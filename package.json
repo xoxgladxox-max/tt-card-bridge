@@ -1,0 +1,10 @@
+{
+  "name": "tt-card-bridge",
+  "version": "0.1.0",
+  "description": "卡工程（.md）与 TauriTavern（兼容 SillyTavern）的双向同步、免重启刷新与制卡技能部署",
+  "type": "module",
+  "private": true,
+  "bin": { "tt-card": "bin/tt-card.mjs" },
+  "scripts": { "test": "node --test tests/*.test.mjs" },
+  "engines": { "node": ">=20" }
+}

@@ -1,0 +1,4 @@
+node_modules/
+.runtime/
+config.json
+/templates/card-folder-AGENTS.md
