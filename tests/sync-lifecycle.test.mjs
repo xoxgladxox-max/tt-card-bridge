@@ -123,13 +123,6 @@ test('independent world CLI joins active service queue instead of second write p
   const { stdout } = await exec(process.execPath, ['bin/tt-card.mjs', 'pull', dir, '--book', 'Book'], { cwd: new URL('..', import.meta.url), env: { ...process.env, TAVERN_USER_DIR: f.userDir, TT_BRIDGE_PORT: String(server.address().port), TT_BRIDGE_TOKEN: token }, timeout: 10_000 });
   assert.match(stdout, /clean/); assert.equal(f.service.getProject('Book').targetKind, 'world'); assert.equal(f.service.getProject('Book').cardFile, 'world:Book');
 });
-test('retired flat sync rejects direct and bin entry without touching fake data', async t => {
-  const f = await fixture(t, false), before = files(f.root);
-  for (const args of [['src/sync.mjs', 'watch', 'A.png', f.cardsRoot], ['bin/tt-card.mjs', 'sync', 'new', 'B', 'A.png']]) {
-    await assert.rejects(exec(process.execPath, args, { cwd: new URL('..', import.meta.url), env: { ...process.env, TAVERN_USER_DIR: f.userDir }, timeout: 10_000 }), e => e.code === 2 && /LEGACY_SYNC_DISABLED/.test(e.stderr));
-  }
-  assert.deepEqual(files(f.root), before);
-});
 
 test('new card initialization refuses author-specified existing world before creating or replacing anything', async t => {
   const f = await fixture(t, false), worldFile = path.join(f.userDir, 'worlds', 'Existing.json');

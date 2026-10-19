@@ -37,7 +37,7 @@
 
 ### 4. 技能与 Agent 同步
 - **检查技能与Agent**：一键对照原件 `skills/cf-*`、版本存档 `skills-versions`、LimCode TEST、Claude Code（`~/.claude/skills`）、通用目录 `~/.agents/skills`（Codex 等读取）、酒馆全局技能与 Agent 全局系统提示词原件状态。
-- **同步技能与Agent**：一键存档当前版本，将 7 个 `cf-*` 技能同步部署到 LimCode TEST、Claude Code、`~/.agents/skills` 与酒馆全局技能（宿主目录 `~/.claude`、`~/.agents` 不存在时跳过；只动 `cf-*` 和改名前的旧名目录，不碰第三方技能），并自动更新酒馆中制卡 Agent 配置的技能列表。
+- **同步技能与Agent**：一键存档当前版本，将全部 `cf-*` 技能同步部署到 LimCode TEST、Claude Code、`~/.agents/skills` 与酒馆全局技能（宿主目录 `~/.claude`、`~/.agents` 不存在时跳过；只动 `cf-*` 和改名前的旧名目录，不碰第三方技能），并自动更新酒馆中制卡 Agent 配置的技能列表。
 
 ### 5. 本地新建世界书条目（自动补稳定 `id` 与 `uid`）
 - 在已接入工程的 `world_book/**/<条目>.md` 中编写 frontmatter 与 `<!-- card-forge:body -->` 正文，**可省略 `id` 字段**。
