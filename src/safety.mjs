@@ -64,14 +64,36 @@ export function nodeFiles(dir, skip = new Set(['backups', '待归位', '记录',
   walk('');
   return files;
 }
+// 按卡分开排队：同一张卡的任务依次执行，不同卡互不等待。
+// key 为 null 的是全局任务（换目录、关后台等），要等所有卡的任务做完，之后的任务也等它做完。
 export class SerialQueue {
-  tail = Promise.resolve();
-  current = null;
+  tails = new Map();
+  globalTail = Promise.resolve();
+  active = new Map();
   size = 0;
-  run(label, fn) {
+  #seq = 0;
+  get current() { return this.active.size ? this.active.values().next().value : null; }
+  get tail() { return Promise.all([this.globalTail, ...this.tails.values()]).then(() => {}); }
+  busy(key) { return (this.pending.get(key) ?? 0) > 0; }
+  pending = new Map();
+  run(label, fn, key = null) {
+    const id = ++this.#seq;
+    const previous = key === null ? Promise.all([this.globalTail, ...this.tails.values()]) : Promise.all([this.globalTail, this.tails.get(key)]);
     this.size++;
-    const result = this.tail.then(async () => { this.current = label; try { return await fn(); } finally { this.current = null; this.size--; } });
-    this.tail = result.catch(() => {});
+    if (key !== null) this.pending.set(key, (this.pending.get(key) ?? 0) + 1);
+    const result = previous.then(async () => {
+      this.active.set(id, label && typeof label === 'object' ? { ...label, queueKey: key } : label);
+      try { return await fn(); } finally {
+        this.active.delete(id); this.size--;
+        if (key !== null) { const n = this.pending.get(key) - 1; if (n > 0) this.pending.set(key, n); else this.pending.delete(key); }
+      }
+    });
+    const settled = result.catch(() => {});
+    if (key === null) this.globalTail = settled;
+    else {
+      this.tails.set(key, settled);
+      settled.then(() => { if (this.tails.get(key) === settled) this.tails.delete(key); });
+    }
     return result;
   }
 }

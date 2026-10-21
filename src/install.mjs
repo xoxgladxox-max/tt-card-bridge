@@ -8,6 +8,7 @@ import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tavernDataRoot, tavernUserDir, isNativeSillyTavern } from './paths.mjs';
 import { connection, BRIDGE_BASE, BRIDGE_PORT } from './connection.mjs';
+import { installAgentSetup, removeAgentSetup, manualSteps } from './tt-agent-setup.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const EXT_SRC = path.join(ROOT, 'extension');
@@ -189,6 +190,12 @@ if (tavernRunning() && needsSettingsWrite(process.argv[2] === '--remove')) {
 
 if (process.argv[2] === '--remove') {
   await removeBackgroundDaemon();
+  {
+    const backupDir = path.join(tavernDataRoot(), 'backups', 'tt-card-bridge', `agent-setup-removed-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+    const r = removeAgentSetup({ dataRoot: tavernDataRoot(), backupDir });
+    for (const f of r.removed) console.log(`已删除：${f}`);
+    if (r.backups.length) console.log(`删除前备份：${r.backups.join('；')}`);
+  }
   if (fs.existsSync(EXT_DST)) { backupExtension(); fs.rmSync(EXT_DST, { recursive: true, force: true }); console.log(`已卸载扩展：${EXT_DST}`); }
   else console.log('扩展没有安装');
   console.log(setOldScript(true));
@@ -197,6 +204,17 @@ if (process.argv[2] === '--remove') {
 
 const info = installExtension();
 await ensureBackgroundDaemon(info);
+{
+  const backupDir = path.join(tavernDataRoot(), 'backups', 'tt-card-bridge', `agent-setup-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+  const r = installAgentSetup({ dataRoot: tavernDataRoot(), base: BRIDGE_BASE, token: info.token, backupDir });
+  if (r.skipped) console.log(`没有自动登记 MCP：${r.reason}\n${manualSteps({ base: BRIDGE_BASE })}`);
+  else {
+    console.log(`已写 MCP 登记：${r.registration}`);
+    console.log(`已写「卡工程」Agent 档案：${r.profile}`);
+    if (r.backups.length) console.log(`旧文件备份：${r.backups.join('；')}`);
+    console.log(manualSteps({ base: BRIDGE_BASE }));
+  }
+}
 const ver = JSON.parse(fs.readFileSync(path.join(EXT_DST, 'manifest.json'), 'utf8')).version;
 console.log(`已安装扩展 ${ver}：${EXT_DST}`);
 console.log(setOldScript(false));

@@ -66,6 +66,22 @@ async function runCreateJob(job) {
   const st = ctx();
   const target = `${job.fileName}.png`;
   if (st.characters.some(card => card.avatar.toLowerCase() === target.toLowerCase())) throw new Error('同名角色卡已经存在，未覆盖或接入。');
+  if (typeof job.pngBase64 === 'string' && job.pngBase64) {
+    // 带封面：用酒馆的导入接口，文件名用 preserved_name 固定（与备份恢复同一条路）
+    const bytes = Uint8Array.from(atob(job.pngBase64), c => c.charCodeAt(0));
+    const form = new FormData();
+    form.append('avatar', new Blob([bytes], { type: 'image/png' }), target);
+    form.append('file_type', 'png');
+    form.append('preserved_name', target);
+    const headers = new Headers(st.getRequestHeaders());
+    headers.delete('Content-Type');
+    const r = await fetch('/api/characters/import', { method: 'POST', headers, body: form });
+    if (!r.ok) throw new Error(`带封面建卡失败：HTTP ${r.status} ${(await r.text()).slice(0, 300)}`);
+    const imported = await r.json();
+    const avatar = imported.character?.avatar ?? `${imported.file_name}.png`;
+    await refreshCards([]);
+    return { id: job.id, avatar };
+  }
   const body = {
     ch_name: job.name, file_name: job.fileName,
     description: '', personality: '', scenario: '', first_mes: '', mes_example: '', creator_notes: '',

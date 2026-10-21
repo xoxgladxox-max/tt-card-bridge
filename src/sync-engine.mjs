@@ -43,16 +43,16 @@ export const nodeSignature = (snapshot, updates = []) => {
 export class SyncEngine {
   constructor(adapter) { this.adapter = adapter; }
   async inspect(project) { return compareSnapshot(await this.adapter.snapshot(project)); }
-  async run(project, { direction = 'both', previewRevision, choices, force = false, initializeExpected, skipBackup = false, acceptDataLossRisk = false, backupDir = '' } = {}) {
+  async run(project, { direction = 'both', previewRevision, choices, force = false, replaceRemote = false, initializeExpected, skipBackup = false, acceptDataLossRisk = false, backupDir = '' } = {}) {
     if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖前，必须勾选确认自行承担数据丢失责任', 400);
     await this.adapter.assertAvailable?.(project);
     let before = await this.adapter.snapshot(project);
     if (previewRevision && before.revision !== previewRevision) fail('STALE_PREVIEW', '预览后内容已改变，请重新查看差异');
     const initializing = initializeExpected !== undefined;
-    if (initializing && before.expected.targetWorld && before.expected.targetWorld.hash !== null) fail('WORLD_TARGET_CONFLICT', '首次建卡的目标世界书已存在；不能把摘要匹配当作覆盖授权');
+    if (initializing && !replaceRemote && before.expected.targetWorld && before.expected.targetWorld.hash !== null) fail('WORLD_TARGET_CONFLICT', '首次建卡的目标世界书已存在；不能把摘要匹配当作覆盖授权');
     if (initializing && (hashObject(before.expected) !== hashObject(initializeExpected) || Object.values(before.tavern.slots).some(s => s.value))) fail('STALE_INITIALIZATION', '新建空卡在首次推送前已改变；不会覆盖');
     let diff = compareSnapshot(before);
-    if (diff.issues.length && !initializing) fail('UNSUPPORTED_DIFFERENCE', '设置、绑定或槽位增删需要手动处理；未同步', 409, diff);
+    if (diff.issues.length && !initializing && !replaceRemote) fail('UNSUPPORTED_DIFFERENCE', '设置、绑定或槽位增删需要手动处理；未同步', 409, diff);
     const chosen = new Map();
     if (choices !== undefined) {
       if (!Array.isArray(choices)) fail('INVALID_CHOICE', 'choices 必须为数组', 400);
@@ -64,15 +64,16 @@ export class SyncEngine {
       }
     }
     const conflicts = diff.slots.filter(s => s.kind === 'conflict' && !chosen.has(s.key));
-    if (initializing || (force && direction === 'push')) for (const s of conflicts) chosen.set(s.key, s.node);
+    if (initializing || replaceRemote || (force && direction === 'push')) for (const s of conflicts) chosen.set(s.key, s.node);
     else if (conflicts.length) fail('CONFLICT', '两边不同且没有安全基线；请选择正文，不会自动覆盖', 409, diff);
-    if (direction === 'push' && diff.slots.some(s => s.kind === 'tavern' && !chosen.has(s.key)) && !force) fail('TAVERN_CHANGED', '酒馆有尚未拉回的变化', 409, diff);
-    if (diff.clean && !initializing) { await this.adapter.saveBaseline(project, before, true); return { status: 'clean', changed: false }; }
+    if (direction === 'push' && diff.slots.some(s => s.kind === 'tavern' && !chosen.has(s.key)) && !force && !replaceRemote) fail('TAVERN_CHANGED', '酒馆有尚未拉回的变化', 409, diff);
+    if (diff.clean && !initializing && !replaceRemote) { await this.adapter.saveBaseline(project, before, true); return { status: 'clean', changed: false }; }
     const updates = [];
-    let needsPush = initializing;
+    let needsPush = initializing || (replaceRemote && diff.issues.length > 0);
     for (const s of diff.slots) {
       if (s.kind === 'equal') continue;
-      const value = chosen.has(s.key) ? chosen.get(s.key) : s.kind === 'tavern' && direction !== 'push' ? s.tavern : s.node;
+      if (replaceRemote && s.kind === 'added') { needsPush = true; continue; }
+      const value = chosen.has(s.key) ? chosen.get(s.key) : s.kind === 'tavern' && direction !== 'push' && !replaceRemote ? s.tavern : s.node;
       if (value !== s.node) updates.push({ key: s.key, value });
       if (value !== s.tavern && direction !== 'pull') needsPush = true;
     }

@@ -47,8 +47,9 @@ test('new service paused; legacy baseline retained; check/diff/status are read-o
   adapter.node = 'local'; const before = tree(root);
   assert.equal((await service.status()).paused, true);
   assert.equal((await service.status()).projects[0].attached, true);
-  assert.equal((await service.status()).unattachedCards.length, 1);
-  await service.control({ action: 'check' }); await service.control({ action: 'diff', projectId: 'A' });
+  assert.equal((await service.status()).unattachedCards, undefined);
+  await assert.rejects(service.control({ action: 'check' }), e => e.code === 'PROJECT_REQUIRED');
+  await service.control({ action: 'check', projectId: 'A' }); await service.control({ action: 'diff', projectId: 'A' });
   assert.deepEqual(tree(root), before); assert.equal(adapter.writes + adapter.pushes + adapter.saved, 0);
 });
 test('three-way sync pulls remote and pushes local with one comparison', async () => {
@@ -94,6 +95,7 @@ test('pause lets an in-flight write finish and blocks future automatic work', as
   const { service, adapter } = serviceFixture(t); adapter.node = 'local';
   let release, entered; const started = new Promise(r => entered = r); const gate = new Promise(r => release = r);
   adapter.beforePush = async () => { entered(); await gate; };
+  await service.control({ action: 'followCard', cardFile: 'A.png' });
   await service.control({ action: 'resume' });
   const task = service.queue.run('automatic', () => service.batch('sync', undefined, true));
   await started; await service.control({ action: 'pause' }); assert.equal(adapter.remote, 'base'); release(); await task;
@@ -107,9 +109,19 @@ test('service requests are serialized and queue failures do not swallow the next
   let release, entered; const gate = new Promise(r => release = r), started = new Promise(r => entered = r);
   adapter.beforePush = async () => { entered(); await gate; };
   const first = service.control({ action: 'sync', projectId: 'A' }); await started;
-  let secondDone = false; const second = service.control({ action: 'check' }).then(x => { secondDone = true; return x; });
+  let secondDone = false; const second = service.control({ action: 'check', projectId: 'A' }).then(x => { secondDone = true; return x; });
   await new Promise(r => setTimeout(r, 10)); assert.equal(secondDone, false); release(); await first; await second;
-  await assert.rejects(service.control({ action: 'nonsense' })); assert.ok((await service.control({ action: 'check' })).results.length);
+  await assert.rejects(service.control({ action: 'nonsense' })); assert.ok((await service.control({ action: 'check', projectId: 'A' })).results.length);
+});
+test('automatic sync touches only the card open in the tavern; no open card means no work', async t => {
+  const { service, adapter } = serviceFixture(t); adapter.node = 'local';
+  await service.control({ action: 'resume' });
+  assert.deepEqual((await service.batch('sync', undefined, true)).results, []); assert.equal(adapter.pushes, 0);
+  await service.control({ action: 'followCard', cardFile: 'B.png' });
+  assert.deepEqual((await service.batch('sync', undefined, true)).results, []); assert.equal(adapter.pushes, 0);
+  await service.control({ action: 'followCard', cardFile: 'A.png' });
+  const result = await service.batch('sync', undefined, true);
+  assert.deepEqual(result.results.map(r => r.projectId), ['A']); assert.equal(adapter.remote, 'local');
 });
 test('card and skill jobs share FIFO and cannot overwrite active or duplicate IDs', () => {
   const q = new JobQueue(); q.publish('card', { id: 'one' }); q.publish('skills', { id: 'two' }); q.publish('card', { id: 'three' });
@@ -388,4 +400,40 @@ test('editing during backup invalidates new-entry plan without replacing author 
   await assert.rejects(f.engine.run(f.project), e => e.code === 'STALE_PREVIEW');
   assert.equal(fs.readFileSync(f.file, 'utf8'), f.raw + 'Concurrent edit.\n');
   assert.deepEqual(fs.readFileSync(f.pngPath), png);
+});
+test('bad file format pauses only this card with file list, touches nothing', async t => {
+  const f = await newEntryFixture(t), png = fs.readFileSync(f.pngPath);
+  fs.writeFileSync(f.file, '---\ntype: lore\ntitle: Broken\n---\nno body mark here\n');
+  const before = tree(f.project.dir);
+  await assert.rejects(f.engine.run(f.project), e => e.code === 'INVALID_FORMAT' && e.details.badFiles.some(b => b.relPath === 'world_book/new-entry.md'));
+  assert.deepEqual(tree(f.project.dir), before); assert.deepEqual(fs.readFileSync(f.pngPath), png);
+});
+test('notes in card root do not change local revision; sync files do', async t => {
+  const f = await newEntryFixture(t), rev = f.adapter.localRevision(f.project);
+  fs.writeFileSync(path.join(f.project.dir, '笔记.txt'), 'draft');
+  fs.mkdirSync(path.join(f.project.dir, '调研')); fs.writeFileSync(path.join(f.project.dir, '调研', 'a.md'), 'x');
+  assert.equal(f.adapter.localRevision(f.project), rev);
+  fs.writeFileSync(f.file, f.raw + 'more\n');
+  assert.notEqual(f.adapter.localRevision(f.project), rev);
+});
+test('queue: different cards run in parallel, same card in order, global waits for all', async t => {
+  const { SerialQueue } = await import('../src/safety.mjs');
+  const q = new SerialQueue(), log = [];
+  let releaseA; const gateA = new Promise(r => { releaseA = r; });
+  const a1 = q.run('a1', async () => { await gateA; log.push('a1'); }, 'a');
+  const a2 = q.run('a2', async () => { log.push('a2'); }, 'a');
+  await q.run('b1', async () => { log.push('b1'); }, 'b');
+  assert.deepEqual(log, ['b1']); assert.equal(q.busy('a'), true); assert.equal(q.busy('b'), false);
+  const g = q.run('g', async () => { log.push('g'); });
+  const b2 = q.run('b2', async () => { log.push('b2'); }, 'b');
+  releaseA(); await Promise.all([a1, a2, g, b2]);
+  assert.deepEqual(log, ['b1', 'a1', 'a2', 'g', 'b2']);
+  assert.equal(q.size, 0); await q.tail;
+});
+test('service.json is filled with defaults and bad values are corrected', async () => {
+  const { normalizeState, DEFAULT_STATE } = await import('../src/sync-service.mjs');
+  assert.deepEqual(normalizeState(null), { ...DEFAULT_STATE });
+  const s = normalizeState({ paused: 'no', pollIntervalMs: 5, autoBackupBeforeOverwrite: false, activeCardFile: '  A.png ', assembleRoot: 'D:\\old' });
+  assert.equal(s.paused, true); assert.equal(s.pollIntervalMs, 2000); assert.equal(s.autoBackupBeforeOverwrite, false);
+  assert.equal(s.activeCardFile, 'A.png'); assert.equal('assembleRoot' in s, false);
 });

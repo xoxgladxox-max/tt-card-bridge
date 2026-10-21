@@ -33,7 +33,7 @@ CLI / mirror → 同一个 SyncService / SyncEngine / FileSyncAdapter
   "token": "由安装器生成，勿分享",
   "launch": {
     "script": "<bridge>/src/mirror.mjs",
-    "cardsRoot": "<工程根目录>",
+    "cardsRoot": "<工作区目录>",
     "cwd": "<bridge>"
   }
 }
@@ -41,7 +41,7 @@ CLI / mirror → 同一个 SyncService / SyncEngine / FileSyncAdapter
 
 连接配置不写进卡片、扩展设置或源码里的扩展目录。`TT_BRIDGE_PORT` 指定端口，`TT_BRIDGE_TOKEN` 可以注入令牌；启动时令牌通过子进程环境变量传入，不放进命令行参数。
 
-默认工程根目录取 `config.cardsRoot`；安装时可以用 `TT_BRIDGE_CARDS_ROOT` 另行指定。
+默认工作区目录取 `config.cardsRoot`；安装时可以用 `TT_BRIDGE_CARDS_ROOT` 另行指定。
 
 | 操作 | 请求 | 返回 |
 |---|---|---|
@@ -74,7 +74,7 @@ CLI / mirror → 同一个 SyncService / SyncEngine / FileSyncAdapter
 
 - `src-tauri/crates/tauritavern/Cargo.toml`：在桌面依赖区接入 `tauri-plugin-shell`，锁文件由 Cargo 生成。
 - `src-tauri/crates/tauritavern/src/app/host/plugins.rs`：按现有插件注册方式接入官方插件，不另建进程服务。
-- `src-tauri/crates/tauritavern/capabilities/`：只允许桌面主窗口执行命名命令 `tt-card-bridge`（Node + 已安装配置里的 `src/mirror.mjs` 与工程根目录），不开放任意 Shell 命令。
+- `src-tauri/crates/tauritavern/capabilities/`：只允许桌面主窗口执行命名命令 `tt-card-bridge`（Node + 已安装配置里的 `src/mirror.mjs` 与工作区目录），不开放任意 Shell 命令。
 - `src-tauri/crates/tauritavern/tauri.conf.json` 已有 `withGlobalTauri: true`，不需要额外的 JS 插件桥。
 
 安装器在覆盖旧扩展前会备份到 `<data>/backups/tt-card-bridge/<时间>`。

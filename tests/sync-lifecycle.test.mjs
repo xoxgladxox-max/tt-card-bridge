@@ -95,24 +95,34 @@ test('old-name backup stays readable but cross-name import restore is refused be
   await assert.rejects(f.service.control({ action: 'restore', projectId: f.project.id, previewId: preview.previewId, confirm: true }), e => e.code === 'UNSUPPORTED_RESTORE');
   assert.deepEqual(files(f.root), before); assert.equal(f.calls.length, 0);
 });
-test('enabled mirror creates stable folders, renames same identity, and never deletes remote cards', async t => {
+test('automatic sync never creates cards; it only follows and renames the card open in the tavern', async t => {
   const f = await fixture(t, false), dir = path.join(f.cardsRoot, 'B'); fs.mkdirSync(dir, { recursive: true });
-  await f.service.batch('sync', undefined, true); assert.equal(f.calls.length, 0);
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'plain folder');
   await f.service.control({ action: 'resume' });
-  await f.service.batch('sync', undefined, true); let result = await f.service.batch('sync', undefined, true);
-  assert.equal(result.results[0].status, 'clean', JSON.stringify(result)); assert.ok(fs.existsSync(path.join(f.userDir, 'characters', 'B.png')));
+  await f.service.control({ action: 'followCard', cardFile: 'B.png' });
+  await f.service.batch('sync', undefined, true); await f.service.batch('sync', undefined, true);
+  assert.equal(f.calls.length, 0); assert.equal(fs.existsSync(path.join(dir, 'card.md')), false); assert.equal(fs.existsSync(path.join(dir, '.card-forge')), false);
+  assert.equal(fs.existsSync(path.join(f.userDir, 'characters', 'B.png')), false);
+  assert.equal((await f.service.status()).projects.some(p => p.id === 'B'), false);
+  // 已经拆出、且正在酒馆里打开的卡：文件夹改名仍跟着改卡名，不重建、不删酒馆里的卡
+  fs.rmSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(f.userDir, 'characters', 'B.png'), embedChara(image, blank('B')));
+  await f.service.control({ action: 'attach', cardFile: 'B.png' });
   const key = JSON.parse(fs.readFileSync(path.join(dir, '.card-forge', 'bridge.json'))).projectKey;
+  await f.service.batch('sync', undefined, true);
   const renamedDir = path.join(f.cardsRoot, 'C'); fs.renameSync(dir, renamedDir);
-  result = await f.service.batch('sync', undefined, true); assert.equal(result.results[0].status, 'clean', JSON.stringify(result));
-  assert.ok(fs.existsSync(path.join(f.userDir, 'characters', 'C.png'))); assert.equal(f.calls.filter(j => j.op === 'create').length, 1); assert.equal(f.calls.filter(j => j.op === 'rename').length, 1);
+  await f.service.batch('sync', undefined, true); const result = await f.service.batch('sync', undefined, true);
+  assert.equal(result.results[0].status, 'clean', JSON.stringify(result));
+  assert.ok(fs.existsSync(path.join(f.userDir, 'characters', 'C.png'))); assert.equal(f.calls.filter(j => j.op === 'create').length, 0); assert.equal(f.calls.filter(j => j.op === 'rename').length, 1);
+  assert.equal((await f.service.status()).activeCardFile, 'C.png');
   assert.equal(JSON.parse(fs.readFileSync(path.join(renamedDir, '.card-forge', 'bridge.json'))).projectKey, key);
-  assert.ok(f.adapter.backups(f.service.getProject('C')).some(b => b.supported && b.bindingChanged));
   fs.rmSync(renamedDir, { recursive: true }); await f.service.batch('sync', undefined, true); assert.ok(fs.existsSync(path.join(f.userDir, 'characters', 'C.png')));
 });
 test('same-name local newcomer and detached/paused folders never create or overwrite cards', async t => {
   const f = await fixture(t, false), dir = path.join(f.cardsRoot, 'A'); fs.mkdirSync(dir, { recursive: true });
-  await f.service.control({ action: 'resume' }); const result = await f.service.batch('sync', undefined, true);
-  assert.equal(result.results[0].error.code, 'ATTACH_CONFLICT'); assert.equal(f.calls.length, 0); assert.equal(fs.existsSync(path.join(dir, 'card.md')), false);
+  await f.service.control({ action: 'resume' }); await f.service.control({ action: 'followCard', cardFile: 'A.png' });
+  const result = await f.service.batch('sync', undefined, true);
+  assert.deepEqual(result.results, []); assert.equal(f.calls.length, 0); assert.equal(fs.existsSync(path.join(dir, 'card.md')), false);
   atomicJson(path.join(dir, '.card-forge', 'bridge.json'), { cardFile: 'A.png', detached: true }); await f.service.batch('sync', undefined, true); assert.equal(f.calls.length, 0);
 });
 test('independent world CLI joins active service queue instead of second write path', async t => {
@@ -129,9 +139,9 @@ test('new card initialization refuses author-specified existing world before cre
   atomicJson(worldFile, { entries: { 1: { uid: 1, content: 'must survive' } } });
   const dir = path.join(f.cardsRoot, 'B'); fs.mkdirSync(dir, { recursive: true });
   const root = '---\nid: card-root\ntype: card\nname: B\ntavern:\n  data:\n    extensions:\n      world: Existing\n---\n<!-- body -->\n'; fs.writeFileSync(path.join(dir, 'card.md'), root);
-  await f.service.control({ action: 'resume' }); const before = files(f.root);
+  await f.service.control({ action: 'resume' }); await f.service.control({ action: 'followCard', cardFile: 'B.png' }); const before = files(f.root);
   await f.service.batch('sync', undefined, true); const result = await f.service.batch('sync', undefined, true);
-  assert.equal(result.results[0].error.code, 'WORLD_TARGET_CONFLICT'); assert.equal(f.calls.length, 0); assert.deepEqual(files(f.root), before);
+  assert.deepEqual(result.results, []); assert.equal(f.calls.length, 0); assert.deepEqual(files(f.root), before);
   // Even if another caller has already created a blank card, the common engine denies this authorization.
   fs.writeFileSync(path.join(f.userDir, 'characters', 'B.png'), embedChara(image, blank('B')));
   const project = { dir, cardFile: 'B.png' }, snapshot = await f.adapter.snapshot(project);
@@ -167,10 +177,11 @@ test('unconfirmed rename reserves both source and destination names', async t =>
   await assert.rejects(f.service.control({ action: 'attach', cardFile: 'B.png' }), e => e.code === 'ATTACH_CONFLICT');
   const dir = path.join(f.cardsRoot, 'OtherB'); fs.mkdirSync(dir, { recursive: true });
   await assert.rejects(new SyncEngine(f.adapter).run({ dir, cardFile: 'B.png' }), e => e.code === 'TARGET_OCCUPIED');
-  assert.equal((await f.service.status()).unattachedCards.some(c => c.cardFile === 'B.png'), false); assert.equal(f.calls.length, 0);
+  assert.equal((await f.service.status()).unattachedCards, undefined); assert.equal(f.calls.length, 0);
 });
 test('independent world binding and standalone book sync share unresolved target occupancy', async t => {
   const f = await fixture(t, false), oldDir = path.join(f.cardsRoot, 'OldBook'), newDir = path.join(f.cardsRoot, 'NewBook'); fs.mkdirSync(newDir, { recursive: true });
+  fs.writeFileSync(path.join(newDir, 'card.md'), '---\nid: card-root\ntype: card\nname: NewBook\nbook_only: true\n---\n');
   atomicJson(path.join(oldDir, '.card-forge', 'bridge.json'), { cardFile: 'world:Book', detached: true });
   atomicJson(path.join(oldDir, '.card-forge', 'operation.json'), { jobId: 'late-book', cardFile: 'world:Book', state: 'pending' });
   await assert.rejects(f.service.control({ action: 'bindWorld', projectId: 'NewBook', worldName: 'Book' }), e => e.code === 'TARGET_OCCUPIED');
@@ -181,11 +192,13 @@ test('independent world binding and standalone book sync share unresolved target
 test('panel attachWorld unpacks standalone world, export writes dist without dirtying localRevision, and shutdown stops service', async t => {
   const f = await fixture(t), worldFile = path.join(f.userDir, 'worlds', 'Solo.json');
   atomicJson(worldFile, { entries: { 1: { uid: 1, content: 'solo body', key: ['k'], keysecondary: [], comment: 'solo', order: 100, position: 0 } } });
-  const beforeStatus = await f.service.status();
-  assert.ok(beforeStatus.unattachedWorlds.some(w => w.worldName === 'Solo'));
+  assert.equal((await f.service.status()).activeWorld, null);
+  const beforeStatus = await f.service.control({ action: 'followCard', cardFile: 'A.png', worldName: 'Solo' });
+  assert.deepEqual(beforeStatus.activeWorld, { worldName: 'Solo', exists: true, attached: false, projectId: null });
+  assert.equal(beforeStatus.unattachedWorlds, undefined);
   const attached = await f.service.control({ action: 'attachWorld', worldName: 'Solo' });
   assert.equal(attached.id, 'Solo'); assert.equal(attached.cardFile, 'world:Solo');
-  assert.equal((await f.service.status()).unattachedWorlds.some(w => w.worldName === 'Solo'), false);
+  assert.deepEqual((await f.service.status()).activeWorld, { worldName: 'Solo', exists: true, attached: true, projectId: 'Solo' });
   const revBefore = f.adapter.localRevision(f.project);
   const exported = await f.service.control({ action: 'export', projectId: f.project.id });
   assert.ok(fs.existsSync(path.join(exported.outDir, 'A.json')));
@@ -246,15 +259,18 @@ test('custom backupDir writes external backup copy, and skipBackup requires expl
   const reenabledAuto = await f.service.control({ action: 'setAutoBackup', enabled: true });
   assert.equal(reenabledAuto.autoBackupBeforeOverwrite, true);
 
-  // followCard resumes the active attached card and pauses other attached cards
+  // followCard 只记住当前打开的卡，不改其他卡文件夹里的任何文件
   fs.writeFileSync(path.join(f.userDir, 'characters', 'B.png'), embedChara(image, blank('B')));
   await f.service.control({ action: 'attach', cardFile: 'B.png' });
+  const aBefore = files(f.project.dir);
   const followB = await f.service.control({ action: 'followCard', cardFile: 'B.png' });
+  assert.equal(followB.activeCardFile, 'B.png');
   assert.equal(followB.projects.find(p => p.id === 'B').paused, false);
-  assert.equal(followB.projects.find(p => p.id === 'A').paused, true);
+  assert.deepEqual(files(f.project.dir), aBefore);
+  const bBefore = files(path.join(f.cardsRoot, 'B'));
   const followUnattached = await f.service.control({ action: 'followCard', cardFile: 'Unattached.png' });
-  assert.equal(followUnattached.projects.find(p => p.id === 'B').paused, true);
-  assert.equal(followUnattached.projects.find(p => p.id === 'A').paused, true);
+  assert.equal(followUnattached.activeCardFile, 'Unattached.png');
+  assert.deepEqual(files(f.project.dir), aBefore); assert.deepEqual(files(path.join(f.cardsRoot, 'B')), bBefore);
 
   // importFromWorkspace：新格式散文件（没有开头设置）直接按文件位置装配并导入酒馆；调研.md 不进卡
   const looseDir = path.join(f.cardsRoot, 'LooseCard');

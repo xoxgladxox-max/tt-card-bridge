@@ -86,10 +86,15 @@ export class FileSyncAdapter {
   }
   assertTargetAvailable(project) {
     if (!this.cardsRoot) return;
-    const rel = path.relative(this.cardsRoot, project.dir).split(path.sep).join('/');
-    contained(this.cardsRoot, rel);
-    if (!project.staging && rel.split('/').length !== 1) fail('INVALID_PROJECT', '工程必须位于配置的 cards/<卡名> 下', 400);
-    const records = discoverProjects(this.cardsRoot), own = records.find(p => sameProjectPath(p.dir, project.dir));
+    let validLocation = false;
+    try {
+      const rel = path.relative(this.cardsRoot, project.dir).split(path.sep).join('/');
+      contained(this.cardsRoot, rel);
+      if (project.staging || rel.split('/').length === 1) validLocation = true;
+    } catch { /* invalid */ }
+    if (!validLocation) fail('INVALID_PROJECT', '工程必须位于工作区目录下', 400);
+    const records = [...discoverProjects(this.cardsRoot)];
+    const own = records.find(p => sameProjectPath(p.dir, project.dir));
     if (own?.cardFile && project.cardFile && own.cardFile !== project.cardFile) fail('BINDING_CONFLICT', 'CLI目标与工程既有绑定不同');
     if (project.cardFile && records.some(p => !sameProjectPath(p.dir, project.dir) && targetOccupied(p, project.cardFile))) fail('TARGET_OCCUPIED', '同一目标仍由其他工程占用，包含其未决或待恢复操作');
   }
@@ -124,7 +129,7 @@ export class FileSyncAdapter {
   async libraries() {
     if (!this.libs) {
       const load = rel => import(pathToFileURL(path.join(this.skillsRoot, rel)).href);
-      this.libs = Promise.all([load('src/lib/nodes.mjs'), load('src/lib/fingerprint.mjs'), load('src/cmd/build.mjs'), load('src/lib/protocol.mjs'), load('src/cmd/unpack.mjs'), load('node_modules/yaml/dist/index.js')]).then(([nodes, fp, build, protocol, unpack, y]) => ({ nodes, fp, build, protocol, unpack, YAML: y.default ?? y }));
+      this.libs = Promise.all([load('src/lib/nodes.mjs'), load('src/lib/fingerprint.mjs'), load('src/cmd/build.mjs'), load('src/lib/protocol.mjs'), load('src/cmd/unpack.mjs'), load('node_modules/yaml/dist/index.js'), load('src/lib/png.mjs')]).then(([nodes, fp, build, protocol, unpack, y, png]) => ({ nodes, fp, build, protocol, unpack, YAML: y.default ?? y, png }));
     }
     return this.libs;
   }
@@ -141,7 +146,14 @@ export class FileSyncAdapter {
     const local = this.localSnapshot(project);
     const { rawFiles, pendingFiles, baselineRaw } = local;
     const libs = await this.libraries(), { nodes: lib, fp, build, protocol, unpack } = libs;
-    const scan = await lib.scanCard(project.dir);
+    let scan;
+    // regex/、scripts/ 里 JSON 写坏时 scanCard 会抛错：报成格式错误，写明是哪个文件，不当成后台故障
+    try { scan = await lib.scanCard(project.dir); }
+    catch (e) { fail('INVALID_FORMAT', `「${project.id}」有文件格式不对，整张卡本轮没有同步：${e.message}`, 422, { badFiles: [{ relPath: null, message: e.message }] }); }
+    // 文件开头设置写坏、正文边界标记缺失或重复时列出文件名。不能只跳过这个文件继续推送：
+    // 推送的是整张合成卡，少一个文件就等于删掉酒馆里对应的条目
+    const badFiles = scan.nodes.flatMap(n => n.problems.filter(p => ['P0', 'P1', 'P2'].includes(p.rule)).map(p => ({ relPath: n.relPath.split(path.sep).join('/'), message: p.message })));
+    if (badFiles.length) fail('INVALID_FORMAT', `「${project.id}」有 ${badFiles.length} 处格式不对，整张卡本轮没有同步：${badFiles.slice(0, 5).map(b => `${b.relPath}（${b.message}）`).join('；')}${badFiles.length > 5 ? ' 等' : ''}`, 422, { badFiles });
     if (!scan.nodes.some(n => n.type === 'card')) {
       const legacy = scan.legacyHints?.length || isLegacyNodeDirectory(project.dir);
       fail(
@@ -161,6 +173,12 @@ export class FileSyncAdapter {
     if (validation.errors.length) fail('INVALID_PROJECT', protocol.formatReport(validation), 422);
     assertUniqueEntryUids(scan, lib, fp);
     const built = build.assemble(scan);
+    // 「新建副本」导入时世界书改用不重名的名字：只记在 bridge.json，不改工程 card.md
+    const worldOverride = readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
+    if (worldOverride && !project.cardFile.startsWith('world:') && built.card.data) {
+      (built.card.data.extensions ??= {}).world = worldOverride;
+      if (built.card.data.character_book) built.card.data.character_book.name = worldOverride;
+    }
     const nodes = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan);
     for (const [key, slot] of Object.entries(nodes.slots)) if (key.startsWith('entry:') && isWorldEntryPath(slot.relPath)) slot.newEntryEligible = true;
     const targetWorld = built.card.data?.extensions?.world || null;
@@ -184,6 +202,10 @@ export class FileSyncAdapter {
       const t = remoteEntries.get(String(e.id));
       if (!t) continue;
       const { content: ignored, ...nSettings } = e;
+      // 顶层 position 只有 before_char/after_char 两个值；按深度插入（extensions.position 不是 0/1）时它没有意义，
+      // card-forge 装卡写 before_char，酒馆世界书换算回来是 after_char，不算差异。真正的位置看 extensions.position。
+      const byDepth = v => v !== undefined && v !== null && Number(v) !== 0 && Number(v) !== 1;
+      if (byDepth(e.extensions?.position) && byDepth(t.extensions?.position)) delete nSettings.position;
       const names = settingDifferences(nSettings, t);
       if (names.length) issues.push({ kind: 'settings', key: `entry:${e.id}`, message: `条目设置不同：${names.join('、')}` });
     }
@@ -393,8 +415,9 @@ export class FileSyncAdapter {
     if (!fs.existsSync(dir)) return [];
     return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile() && /\.json$/i.test(e.name)).map(e => ({ worldName: path.basename(e.name, '.json') }));
   }
+  // 只按参与同步的文件计算：根目录放笔记、草稿、调研不会触发同步检查
   localRevision(project) {
-    return hashObject({ names: fs.readdirSync(project.dir).filter(n => !n.startsWith('.') && n !== 'dist' && n !== 'backups').sort(), nodes: Object.fromEntries(nodeFiles(project.dir).map(rel => [rel, fs.readFileSync(contained(project.dir, rel), 'utf8')])) });
+    return hashObject({ nodes: Object.fromEntries(nodeFiles(project.dir).map(rel => [rel, fs.readFileSync(contained(project.dir, rel), 'utf8')])) });
   }
   async exportProject(project, outDir) {
     await this.assertAvailable(project);
@@ -427,7 +450,7 @@ export class FileSyncAdapter {
     const eol = raw.includes('\r\n') ? '\r\n' : '\n';
     fs.writeFileSync(file, `---${eol}${String(doc).trimEnd().replaceAll('\n', eol)}${eol}---` + raw.slice(match[0].length), 'utf8');
   }
-  async prepareNew(project, { embedWorld = false } = {}) {
+  async prepareNew(project, { embedWorld = false, allowExistingWorld = false } = {}) {
     const { YAML, nodes, build } = await this.libraries();
     const root = contained(project.dir, 'card.md');
     if (!fs.existsSync(root)) {
@@ -440,7 +463,7 @@ export class FileSyncAdapter {
     const scan = await nodes.scanCard(project.dir), card = build.assemble(scan).card;
     if (scan.nodes.find(n => n.type === 'card')?.frontmatter?.book_only) fail('WORLD_ONLY_PROJECT', '独立世界书工程不自动建卡');
     const explicitWorld = card.data?.extensions?.world;
-    if (explicitWorld && fs.existsSync(worldFilePath(explicitWorld, this.userDir))) fail('WORLD_TARGET_CONFLICT', `工程指定的世界书「${explicitWorld}」已存在；没有新建卡或覆盖世界书`);
+    if (explicitWorld && !allowExistingWorld && fs.existsSync(worldFilePath(explicitWorld, this.userDir))) fail('WORLD_TARGET_CONFLICT', `工程指定的世界书「${explicitWorld}」已存在；没有新建卡或覆盖世界书`);
     if (!embedWorld && nodes.bookNodesOf(scan).length && !card.data?.extensions?.world) {
       const base = project.name; let name = base;
       for (let i = 2; fs.existsSync(worldFilePath(name, this.userDir)); i++) name = `${base}（${i}）`;
@@ -448,9 +471,25 @@ export class FileSyncAdapter {
     }
     const report = (await this.libraries()).protocol.validateNodes(await nodes.scanCard(project.dir));
     if (report.errors.length) fail('INVALID_PROJECT', (await this.libraries()).protocol.formatReport(report), 422);
+    return {
+      cardName: (card.data?.name || project.name).trim() || project.name,
+      explicitWorld: explicitWorld || null,
+    };
   }
-  async create(project, jobId) {
-    const result = await this.send(project, { id: jobId, op: 'create', name: project.name, fileName: project.name, expectedAbsent: true });
+  async create(project, jobId, { displayName } = {}) {
+    // 带封面建卡：工程里有 character.png 时，把它做成只含卡名的空白卡，由酒馆「导入」接口按指定文件名建卡；
+    // 正文和世界书仍由随后的推送写入。没有封面时退回酒馆的建卡接口（默认头像）。
+    const name = (displayName || project.name).trim() || project.name;
+    let pngBase64 = null;
+    const cover = path.join(project.dir, 'character.png');
+    if (fs.existsSync(cover)) {
+      const { png } = await this.libraries();
+      const blank = { name, description: '', personality: '', scenario: '', first_mes: '', mes_example: '', spec: 'chara_card_v2', spec_version: '2.0',
+        data: { name, description: '', personality: '', scenario: '', first_mes: '', mes_example: '', creator_notes: '', system_prompt: '', post_history_instructions: '',
+          alternate_greetings: [], tags: [], creator: '', character_version: '', extensions: {} } };
+      pngBase64 = png.embedChara(fs.readFileSync(cover), blank).toString('base64');
+    }
+    const result = await this.send(project, { id: jobId, op: 'create', name, fileName: project.name, expectedAbsent: true, ...(pngBase64 ? { pngBase64 } : {}) });
     if (!result || result.fatal) fail('CREATE_FAILED', result?.fatal ?? '酒馆未确认新建', 502);
     segment(result.avatar, '返回的卡文件名'); return result.avatar;
   }

@@ -2,6 +2,7 @@
 import http from 'node:http';
 import { BRIDGE_PORT, BRIDGE_BASE, connection, authorized, allowedOrigins, bridgeRequest } from './connection.mjs';
 import { fail, segment, hashObject } from './safety.mjs';
+import { createMcpHandler } from './mcp.mjs';
 export { BRIDGE_PORT };
 
 export class JobQueue {
@@ -57,9 +58,22 @@ function readBody(req, maxBytes) {
     });
   });
 }
+function readJsonValue(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    let size = 0, chunks = [];
+    req.on('data', c => { size += c.length; if (size <= maxBytes) chunks.push(c); });
+    req.on('error', reject);
+    req.on('end', () => {
+      try {
+        if (size > maxBytes) fail('BODY_TOO_LARGE', '请求体超过上限', 413);
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch (e) { if (!e.status) { e.status = 400; e.code = 'INVALID_JSON'; } reject(e); }
+    });
+  });
+}
 export function createBridgeServer({ token, origins = allowedOrigins(), service = null, queue = new JobQueue(), maxBodyBytes = 16 * 1024 * 1024 } = {}) {
   if (!token) fail('INVALID_TOKEN', '服务必须启用鉴权', 500);
-  let version = Date.now(), files = [];
+  let version = Date.now(), files = [], mcp = null;
   const server = http.createServer(async (req, res) => {
     const origin = req.headers.origin;
     const send = (code, data) => {
@@ -82,6 +96,16 @@ export function createBridgeServer({ token, origins = allowedOrigins(), service 
         return send(200, { ok: true, data: await service.status() });
       }
       if (req.method === 'GET' && endpoint === '/tt-bridge/skills/result') return send(200, queue.result(url.searchParams.get('id')));
+      // MCP（Streamable HTTP）：只接 POST，只回 JSON；不开 GET 的 SSE 流
+      if (endpoint === '/tt-bridge/mcp') {
+        if (!service) fail('NO_SERVICE', '请启动 mirror 管理服务', 503);
+        if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }); return res.end(); }
+        const message = await readJsonValue(req, maxBodyBytes);
+        const reply = await (mcp ??= createMcpHandler(service, { version: String(version) }))(message);
+        if (reply === null) { res.writeHead(202); return res.end(); }
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(JSON.stringify(reply));
+      }
       if (req.method !== 'POST') return send(404, { ok: false, error: { code: 'NOT_FOUND', message: '未知端点' } });
       const body = await readBody(req, maxBodyBytes);
       if (endpoint === '/tt-bridge/control') {

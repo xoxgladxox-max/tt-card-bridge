@@ -77,10 +77,10 @@ export function mountSettings({ client, getContext }) {
             ${icon('toggle', 'fa-power-off', '启动同步', '启动本机后台并启用自动同步；暂停只停止自动处理，不中断正在执行的写入')}
             ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取后台状态')}
           </div>
-          <small>连接：<code data-role="connection">读取中</code> · 工程根目录：<code data-role="cards-root">尚未连接</code></small>
+          <small>连接：<code data-role="connection">读取中</code> · 工作区目录：<code data-role="cards-root">尚未连接</code></small>
           <div class="flex-container">
-            <input data-role="cards-root-input" type="text" class="flex1" placeholder="自定义导入/工程根目录，例如：D:\cards" aria-label="自定义工程根目录" autocomplete="off">
-            ${icon('set-cards-root', 'fa-folder-open', '切换目录', '切换拆包导入与同步的工程根目录')}
+            <input data-role="cards-root-input" type="text" class="flex1" placeholder="工作区目录，例如：D:\cards" aria-label="工作区目录" autocomplete="off">
+            ${icon('set-cards-root', 'fa-folder-open', '切换工作区目录', '拆卡、同步、合成和 Agent 读写都在这个目录里')}
           </div>
           <div class="ttcb-backup-policy">
             <label class="checkbox_label"><input data-role="backup-before-overwrite" type="checkbox" checked><small>每次覆盖写入前自动备份（常驻开关；关闭后直接覆盖需自担数据丢失责任）</small></label>
@@ -92,21 +92,21 @@ export function mountSettings({ client, getContext }) {
           <hr>
           <b>① 拆解当前卡</b>
           <small data-role="current-card"></small>
-          <small>把酒馆当前打开的角色卡拆到 <code>cards\&lt;卡名&gt;\</code>，卡绑定的世界书一起放进卡文件夹。<span data-role="unattached"></span></small>
+          <small>把酒馆当前打开的角色卡拆到工作区目录（<code>cards\&lt;卡名&gt;\</code>），卡绑定的世界书一起放进卡文件夹。只处理当前打开的这一张。</small>
           <div data-role="frameworks"></div>
           <div data-role="extras"></div>
           <div class="flex-container">
-            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '把当前卡拆到工作区（同名文件夹已存在时会先问是否覆盖）')}
+            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '把当前卡拆到工作区目录（同名文件夹已存在时会先问是否覆盖）')}
           </div>
-          <small>独立世界书（只列没有绑定任何卡的）：</small>
+          <small>独立世界书（只认世界书编辑器里当前打开的那一本）：</small>
           <div class="flex-container">
-            <select data-role="worlds" class="flex1" aria-label="没有绑定卡的独立世界书"></select>
-            ${icon('attach-world', 'fa-book', '拆解独立世界书', '把所选世界书拆到 cards\\<世界书名>\\')}
+            <select data-role="worlds" class="flex1" aria-label="世界书编辑器里当前打开的世界书"></select>
+            ${icon('attach-world', 'fa-book', '拆解独立世界书', '把所选世界书拆到工作区目录下')}
           </div>
           <hr>
           <b>② 合成并导入酒馆</b>
-          <small>切卡时自动跟随当前卡；工作区里还没进酒馆的新卡可以在下拉框里选。</small>
-          <select data-role="projects" aria-label="工作区里的卡"></select>
+          <small>把工作区目录里的卡工程合成后写进酒馆。</small>
+          <select data-role="projects" aria-label="工作区目录里的卡工程"></select>
           <small data-role="project-status"></small>
           <div class="flex-container">
             ${icon('import-workspace', 'fa-file-import', '合成并导入酒馆', '把工作区里的卡合成后写进酒馆（新卡会新建）')}
@@ -138,11 +138,35 @@ export function mountSettings({ client, getContext }) {
     const find = role => root.querySelector(`[data-role="${role}"]`);
     const action = name => root.querySelector(`[data-action="${name}"]`);
     let connection = null, state = null, busy = false, refreshing = false, projectSignature = '', worldSignature = '';
-    let lastError = '', lastPolled = 0, actionFailed = false, lastFollowedCard = undefined, scannedCard = null, conflictShownFor = '';
-    const selectedProject = () => state?.projects?.find(project => project.id === find('projects').value);
+    let lastError = '', lastPolled = 0, actionFailed = false, lastFollowedCard = undefined, lastFollowedWorld = undefined, scannedCard = null, conflictShownFor = '';
+    const selectedProject = () => state?.assembleProjects?.find(project => project.id === find('projects').value) ?? state?.projects?.find(project => project.id === find('projects').value);
+    // ② 用：下拉没选中时，工作区目录里只有一张卡就用那张
+    const assembleTarget = () => selectedProject() || (state?.assembleProjects?.length === 1 ? state.assembleProjects[0] : null);
+    // 优先用酒馆自己的弹窗；没有时退回 window.confirm
+    async function askConfirm(message, okText = '确定', cancelText = '取消') {
+        const ctx = getContext();
+        if (typeof ctx?.callGenericPopup === 'function' && ctx.POPUP_TYPE) {
+            const pre = document.createElement('div');
+            pre.style.whiteSpace = 'pre-wrap';
+            pre.style.textAlign = 'left';
+            pre.textContent = message;
+            const result = await ctx.callGenericPopup(pre, ctx.POPUP_TYPE.CONFIRM, '', { okButton: okText, cancelButton: cancelText });
+            return result === true || result === 1 || result === ctx.POPUP_RESULT?.AFFIRMATIVE;
+        }
+        return typeof window.confirm === 'function' ? window.confirm(message) : false;
+    }
+    // ② 的进度与报错就写在 ② 下面，不只写在面板顶部
+    const importNote = (text, warn = false) => find('diff').replaceChildren(element('p', text, warn ? 'ttcb-warning' : undefined));
     const currentCard = () => {
         const ctx = getContext();
         return ctx.groupId ? null : ctx.characters?.[ctx.characterId];
+    };
+    // 世界书编辑器下拉框里当前选中的那一本；没有打开任何世界书时为 null
+    const currentWorldName = () => {
+        const select = document.querySelector('#world_editor_select');
+        const option = select?.selectedOptions?.[0];
+        if (!option || option.value === '' || option.value === '-1') return null;
+        return option.textContent?.trim() || null;
     };
     const confirmAction = message => typeof window.confirm === 'function' ? window.confirm(message) : true;
     function showError(error) {
@@ -212,7 +236,7 @@ export function mountSettings({ client, getContext }) {
         action('skills-deploy').disabled = busy || !state;
         action('attach').disabled = busy || !state || !currentCard();
         action('attach-world').disabled = busy || !state || !find('worlds').value;
-        const project = selectedProject();
+        const project = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
         action('import-workspace').disabled = busy || !state || !project;
         action('backups').disabled = busy || !project?.attached;
         const card = currentCard();
@@ -245,31 +269,14 @@ export function mountSettings({ client, getContext }) {
         const card = currentCard();
         const avatar = card?.avatar ?? null;
         if (!avatar) return;
-        const matched = (state?.projects ?? []).find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase());
-        const placeholder = select.querySelector('option[value=""]');
-        if (matched) {
-            if (placeholder) placeholder.remove();
-            if (select.value !== matched.id) {
-                select.value = matched.id;
-                clearPreviews();
-            }
-        } else {
-            if (!placeholder) {
-                const opt = element('option', `（当前卡「${card.name}」未接入同步）`);
-                opt.value = '';
-                select.prepend(opt);
-            } else {
-                placeholder.textContent = `（当前卡「${card.name}」未接入同步）`;
-            }
-            if (select.value !== '') {
-                select.value = '';
-                clearPreviews();
-            }
+        // ② 的下拉只跟工作区目录走：当前卡刚好在里面就选中它，不在就保持原来的选择，不清空
+        const pool = state?.assembleProjects ?? state?.projects ?? [];
+        const matched = pool.find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase());
+        if (matched && select.value !== matched.id) {
+            select.value = matched.id;
+            clearPreviews();
         }
-        const preferredWorld = card?.data?.extensions?.world || document.querySelector('#world_editor_select option:checked')?.textContent?.trim() || '';
-        if (preferredWorld && (state?.unattachedWorlds ?? []).some(w => w.worldName === preferredWorld)) {
-            find('worlds').value = preferredWorld;
-        }
+        if (!select.value && pool.length === 1) select.value = pool[0].id;
     }
     function renderState() {
         find('cards-root').textContent = state?.cardsRoot ?? '尚未连接';
@@ -278,37 +285,45 @@ export function mountSettings({ client, getContext }) {
         if (state && typeof state.autoBackupBeforeOverwrite === 'boolean') {
             find('backup-before-overwrite').checked = state.autoBackupBeforeOverwrite;
         }
-        const signature = JSON.stringify((state?.projects ?? []).map(p => [p.id, p.name, p.cardFile, p.attached]));
+        const pool = state?.assembleProjects ?? state?.projects ?? [];
+        const signature = JSON.stringify(pool.map(p => [p.id, p.name, p.cardFile, p.attached]));
         if (signature !== projectSignature) {
             projectSignature = signature;
             const select = find('projects'), previous = select.value;
             const current = currentCard()?.avatar;
             select.replaceChildren();
-            for (const project of state?.projects ?? []) {
-                const option = element('option', `${project.name ?? project.cardFile ?? project.id}${project.attached ? '' : '（未接入）'}`);
-                option.value = project.id;
-                select.append(option);
+            if (!pool.length) {
+                const opt = element('option', '（所选装配文件夹内暂无卡工程）');
+                opt.value = '';
+                select.append(opt);
+            } else {
+                for (const project of pool) {
+                    const option = element('option', `${project.name ?? project.cardFile ?? project.id}${project.attached ? '' : '（未接入）'}`);
+                    option.value = project.id;
+                    select.append(option);
+                }
             }
-            const chosen = state?.projects?.find(p => p.cardFile && current && p.cardFile.toLowerCase() === current.toLowerCase())
-                ?? state?.projects?.find(p => p.id === previous);
+            const chosen = pool.find(p => p.cardFile && current && p.cardFile.toLowerCase() === current.toLowerCase())
+                ?? pool.find(p => p.id === previous)
+                ?? (pool.length === 1 ? pool[0] : null);
             if (chosen) select.value = chosen.id;
-            clearPreviews();
+            if (select.value !== previous) clearPreviews();
         }
-        const unlinked = state?.unattachedCards ?? [];
-        find('unattached').textContent = unlinked.length ? `另有 ${unlinked.length} 张未接入的卡，只接入当前卡。` : '';
-        const unlinkedWorlds = state?.unattachedWorlds ?? [];
-        const nextWorldSig = JSON.stringify(unlinkedWorlds.map(w => w.worldName));
+        // 独立世界书：只放世界书编辑器里当前打开的那一本
+        const activeWorld = state?.activeWorld ?? null;
+        const nextWorldSig = JSON.stringify(activeWorld);
         if (nextWorldSig !== worldSignature) {
             worldSignature = nextWorldSig;
-            const wSelect = find('worlds'), prevWorld = wSelect.value;
+            const wSelect = find('worlds');
             wSelect.replaceChildren();
-            if (!unlinkedWorlds.length) {
-                const opt = element('option', '（无未接入的独立世界书）'); opt.value = ''; wSelect.append(opt);
+            if (!activeWorld) {
+                const opt = element('option', '（世界书编辑器里没有打开世界书）'); opt.value = ''; wSelect.append(opt);
+            } else if (!activeWorld.exists) {
+                const opt = element('option', `（找不到世界书文件：${activeWorld.worldName}）`); opt.value = ''; wSelect.append(opt);
             } else {
-                for (const w of unlinkedWorlds) {
-                    const opt = element('option', w.worldName); opt.value = w.worldName; wSelect.append(opt);
-                }
-                if (unlinkedWorlds.some(w => w.worldName === prevWorld)) wSelect.value = prevWorld;
+                const opt = element('option', `${activeWorld.worldName}${activeWorld.attached ? `（已拆到 cards\\${activeWorld.projectId ?? activeWorld.worldName}）` : ''}`);
+                opt.value = activeWorld.worldName; wSelect.append(opt);
+                wSelect.value = activeWorld.worldName;
             }
         }
         if (lastFollowedCard !== undefined) syncSelectionToCurrentCard();
@@ -321,10 +336,12 @@ export function mountSettings({ client, getContext }) {
     async function checkCardFollow() {
         if (!state || busy || refreshing) return;
         const avatar = currentCard()?.avatar ?? null;
-        if (avatar === lastFollowedCard) return;
+        const worldName = currentWorldName();
+        if (avatar === lastFollowedCard && worldName === lastFollowedWorld) return;
         lastFollowedCard = avatar;
+        lastFollowedWorld = worldName;
         try {
-            state = await client.control('followCard', { cardFile: avatar });
+            state = await client.control('followCard', { cardFile: avatar, worldName });
             showError('');
             syncSelectionToCurrentCard();
             renderState();
@@ -482,33 +499,51 @@ export function mountSettings({ client, getContext }) {
         },
         'attach-world': async () => {
             const worldName = find('worlds').value;
-            if (!worldName) throw new Error('请先选择一本独立世界书。');
+            if (!worldName) throw new Error('先在酒馆的世界书编辑器里打开要拆的那本世界书。');
+            if (worldName !== currentWorldName()) throw new Error('世界书编辑器里打开的世界书已经换了，请稍等面板刷新后再点。');
             await attachWithConflictPrompt('attachWorld', { worldName }, worldName);
             find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到 cards\\${worldName}`));
         },
         'import-workspace': async () => {
-            const p = selectedProject();
-            if (!p) throw new Error('请先在下拉框中选择一个工作区工程文件夹。');
-            const backupOpts = overwriteBackupOptions(`从工作区合成「${p.id}」并导入酒馆`);
+            const p = assembleTarget();
+            if (!p) { importNote('工作区目录里没有可导入的卡工程，或下拉框没有选中。', true); return; }
+            importNote(`正在合成「${p.id}」并导入酒馆…`);
+            const send = extra => client.control('importFromWorkspace', { projectId: p.id, ...extra });
             let res;
             try {
-                res = await client.control('importFromWorkspace', { projectId: p.id, ...backupOpts });
+                try {
+                    res = await send({});
+                } catch (error) {
+                    if (error?.code !== 'ATTACH_CONFLICT') throw error;
+                    const copy = await askConfirm(
+                        `${error.message}\n\n「新建一张」：像酒馆导入重名卡一样自动加编号，原有的卡和世界书都不动。\n「不新建」：接着问是否覆盖。`,
+                        '新建一张', '不新建',
+                    );
+                    if (copy) {
+                        importNote('正在新建卡并写入内容…');
+                        res = await send({ createNewCopy: true });
+                    } else {
+                        const over = await askConfirm(`是否用「${p.id}」的内容覆盖酒馆里的同名卡和世界书？\n（会按上方备份设置先备份）`, '覆盖', '取消');
+                        if (!over) { importNote('已取消，没有导入。'); return; }
+                        const backupOpts = overwriteBackupOptions(`用「${p.id}」覆盖酒馆同名卡`);
+                        importNote('正在覆盖导入…');
+                        res = await send({ overwrite: true, ...backupOpts });
+                    }
+                }
             } catch (error) {
-                if (error?.code !== 'ATTACH_CONFLICT') throw error;
-                const ok = confirmAction(`${error.message}\n\n是否确认用工作区「${p.id}」的内容覆盖导入酒馆同名卡？`);
-                if (!ok) throw error;
-                res = await client.control('importFromWorkspace', { projectId: p.id, overwrite: true, ...backupOpts });
+                importNote(`导入失败：${errorText(error)}`, true);
+                throw error;
             }
-            clearPreviews();
-            find('diff').replaceChildren(element('p', `已把 cards\\${p.id} 合成并导入酒馆。`));
+            const made = res?.project?.cardFile ? `（酒馆里的卡文件：${res.project.cardFile}）` : '';
+            importNote(`已把「${p.id}」合成并导入酒馆${made}。`);
         },
         'set-cards-root': async () => {
             const cardsRoot = find('cards-root-input').value.trim();
-            if (!cardsRoot) throw new Error('请填写要切换的工程根目录路径。');
+            if (!cardsRoot) throw new Error('请填写要切换的工作区目录路径。');
             const res = await client.control('setCardsRoot', { cardsRoot });
             find('cards-root-input').value = res.cardsRoot;
             clearPreviews();
-            find('diff').replaceChildren(element('p', `已切换工程根目录至：${res.cardsRoot}`));
+            find('diff').replaceChildren(element('p', `已切换工作区目录至：${res.cardsRoot}`));
         },
         'set-backup-dir': async () => {
             const backupDir = find('backup-dir').value.trim();
