@@ -93,8 +93,8 @@ test('card tools always force backup and only disassemble the open card', async 
   service.state.activeCardFile = 'A.png'; service.state.autoBackupBeforeOverwrite = false;
   await tools.disassemble_card({ overwrite: true });
   await tools.sync_now({ projectId: 'A' });
-  await tools.assemble_card({ projectId: 'A', overwrite: true });
-  assert.deepEqual(calls.map(c => [c.action, c.skipBackup]), [['attach', false], ['sync', false], ['importFromWorkspace', false]]);
+  assert.equal('assemble_card' in tools, false);
+  assert.deepEqual(calls.map(c => [c.action, c.skipBackup]), [['attach', false], ['sync', false]]);
   assert.equal(calls[0].cardFile, 'A.png');
   const preview = await tools.restore_backup({ kind: 'card', projectId: 'A', backupId: 'b1' });
   assert.equal(preview.step, 'preview');

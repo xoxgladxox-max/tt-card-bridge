@@ -50,7 +50,6 @@ export const TOOLS = [
   { name: 'move', description: '移动或改名。目标不能已存在。移动文件要带 baseHash；不能移动卡工程文件夹本身。', inputSchema: obj({ from: PATH, to: PATH, baseHash: HASH }, ['from', 'to']) },
   { name: 'delete', description: '删除文件或子目录：实际是移入备份，可用 restore_backup 找回。删文件要带 baseHash；不能删卡工程文件夹本身。', inputSchema: obj({ path: PATH, baseHash: HASH }, ['path']) },
   { name: 'disassemble_card', description: '把酒馆里当前打开的那张卡拆到工作区目录（只能拆当前打开的卡）。文件夹已存在时需 overwrite:true，覆盖前自动备份。', inputSchema: obj({ overwrite: { type: 'boolean' } }) },
-  { name: 'assemble_card', description: '把工作区目录里的卡工程合成后写进酒馆，写前自动备份。酒馆已有同名卡时需选 overwrite 或 createNewCopy。', inputSchema: obj({ projectId: PROJECT, overwrite: { type: 'boolean' }, createNewCopy: { type: 'boolean' } }, ['projectId']) },
   { name: 'sync_now', description: '立即对一张已接入酒馆的卡做一次双向同步，写前自动备份。两边都改过时返回冲突，不会自动覆盖。', inputSchema: obj({ projectId: PROJECT }, ['projectId']) },
   { name: 'validate_card', description: '按 card-forge 协议检查卡工程，列出错误和警告，不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
   { name: 'validate_worldbook', description: '只检查卡工程 world_book/ 里的条目，不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
@@ -257,10 +256,6 @@ export function createMcpTools(service) {
       const cardFile = service.state.activeCardFile;
       if (!cardFile) fail('NO_ACTIVE_CARD', '酒馆里没有打开角色卡（或是群聊）；请作者先在酒馆里打开要拆的卡', 409);
       return control({ action: 'attach', cardFile, overwrite: Boolean(overwrite), ...forcedBackup });
-    },
-    async assemble_card({ projectId, overwrite = false, createNewCopy = false }) {
-      projectDir(projectId);
-      return control({ action: 'importFromWorkspace', projectId: projectId.trim(), overwrite: Boolean(overwrite), createNewCopy: Boolean(createNewCopy), ...forcedBackup });
     },
     async sync_now({ projectId }) {
       projectDir(projectId);

@@ -8,7 +8,7 @@ import path from 'node:path';
 export const BRIDGE_MCP_ID = 'c4a7e2b1-5d3f-4e8a-9b6c-7cb1d9e0a001';
 export const BRIDGE_PROFILE_ID = 'card-bridge';
 // 与 src/mcp.mjs 的 TOOLS 同名
-export const BRIDGE_TOOL_NAMES = ['status', 'list_files', 'read_file', 'search_files', 'file_info', 'write_file', 'apply_patch', 'create_dir', 'move', 'delete', 'disassemble_card', 'assemble_card', 'sync_now', 'validate_card', 'validate_worldbook', 'list_backups', 'restore_backup'];
+export const BRIDGE_TOOL_NAMES = ['status', 'list_files', 'read_file', 'search_files', 'file_info', 'write_file', 'apply_patch', 'create_dir', 'move', 'delete', 'disassemble_card', 'sync_now', 'validate_card', 'validate_worldbook', 'list_backups', 'restore_backup'];
 
 const ttRoot = dataRoot => path.join(dataRoot, '_tauritavern');
 const registrationFile = dataRoot => path.join(ttRoot(dataRoot), 'mcp', 'registrations', `${BRIDGE_MCP_ID}.json`);
@@ -65,7 +65,7 @@ tools:
 
 - 后台只同步作者在酒馆里当前打开的那张卡。status 里的 activeCardFile 就是它。
 - disassemble_card 只拆当前打开的卡；要拆别的卡，请作者先在酒馆里打开。
-- assemble_card 把工作区目录里的工程合成后写进酒馆；酒馆已有同名卡时返回 ATTACH_CONFLICT，把选择（覆盖或新建副本）交给作者，不自己决定。
+- 合卡不在这里做：作者在 VS Code 里用 LimCode 的写卡技能合成卡，再导入酒馆。作者要求合卡时，提醒作者走这条路。
 - sync_now 返回冲突时，把冲突内容列给作者，不自行选边。
 - 改完卡文件后可以用 validate_card、validate_worldbook 检查格式。
 
@@ -139,6 +139,6 @@ export function manualSteps({ base }) {
     '  1. 酒馆 → Agent 设置 → MCP → 新增服务器',
     `  2. 地址：${base}/tt-bridge/mcp`,
     '  3. 请求头：Authorization = Bearer <令牌>（令牌在 tt-card-bridge\\.runtime\\connection.json 的 token）',
-    '  4. 保存后刷新工具列表，把 17 个工具设为允许',
+    `  4. 保存后刷新工具列表，把 ${BRIDGE_TOOL_NAMES.length} 个工具设为允许`,
   ].join('\n');
 }

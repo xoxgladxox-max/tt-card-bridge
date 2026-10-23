@@ -49,7 +49,7 @@
 ### 6. 酒馆 Agent 读写工作区（MCP）
 后台在 `http://127.0.0.1:18789/tt-bridge/mcp` 提供 MCP 接口（须带连接令牌），让 TauriTavern 的 Agent 和 VS Code 读写同一个工作区目录。
 - `install` 会在 `_tauritavern\mcp\registrations\` 写一条 bridge 自己的登记，在 `_tauritavern\agent-profiles\profiles\` 写「卡工程」档案 `card-bridge.json`；同名旧文件先备份到 `data\backups\tt-card-bridge\agent-setup-<时间>\`。其他登记和档案不动。`install --remove` 只删这两个文件（同样先备份）。酒馆里看不到时按 install 打印的步骤手动登记。
-- 工具：`status`、`list_files`、`read_file`、`search_files`、`file_info`、`write_file`、`apply_patch`、`create_dir`、`move`、`delete`、`disassemble_card`、`assemble_card`、`sync_now`、`validate_card`、`validate_worldbook`、`list_backups`、`restore_backup`。没有执行命令和改目录的工具。
+- 工具：`status`、`list_files`、`read_file`、`search_files`、`file_info`、`write_file`、`apply_patch`、`create_dir`、`move`、`delete`、`disassemble_card`、`sync_now`、`validate_card`、`validate_worldbook`、`list_backups`、`restore_backup`。没有执行命令和改目录的工具，也没有合卡工具：合卡由 LimCode 在 VS Code 里用写卡技能完成，再导入酒馆。
 - 写入规则：路径限定在工作区目录内；不能写 `.card-forge` 等点开头的目录和 `backups\`；不能删除或移动卡工程文件夹本身。改已有文件必须带 `read_file` 返回的 hash，对不上就拒绝（`HASH_MISMATCH`）。覆盖、删除、移动前一律备份到 `<工作区目录>\backups\files\`，不看「覆盖前自动备份」开关；删除实际是移入备份。`disassemble_card` 只拆酒馆当前打开的卡；整卡恢复须先预览再 `confirm`。
 
 ## 命令行入口（与面板共用同一套引擎与队列）
