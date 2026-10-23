@@ -528,9 +528,14 @@ export class FileSyncAdapter {
     const out = path.join(stage, 'project');
     if (!worldOnly) {
       const effective = structuredClone(remote.tavern.card);
+      const effData = effective.data ?? effective;
       if (remote.worldRaw !== null) {
         const book = unpack.worldFileToCard(JSON.parse(remote.worldRaw), remote.worldName).data.character_book;
-        (effective.data ?? effective).character_book = book;
+        effData.character_book = book;
+      } else if (effData.character_book == null) {
+        // 酒馆新建的空卡写的是 character_book: null。空卡拆出来没有条目，合成时也不会生成这个键；
+        // 留着 null 会让往返比对把「null 对没有」当成不一致。只删源副本里的这个键，酒馆里的卡不动。
+        delete effData.character_book;
       }
       fs.writeFileSync(source, JSON.stringify(effective), 'utf8');
     }

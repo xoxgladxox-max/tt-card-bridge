@@ -197,6 +197,16 @@ test('forge attach keeps original PNG, rejects initial same-name directory, and 
   assert.deepEqual(fs.readFileSync(path.join(f.cardsRoot, 'A', '.card-forge', 'originals', 'A.png')), original);
   const diff = await f.service.control({ action: 'diff', projectId: project.id }); assert.equal(diff.clean, true); assert.ok(diff.slots.some(s => s.tavern === 'external body' && s.node === 'external body'));
 });
+test('attach accepts a fresh Tavern card whose character_book is null', async t => {
+  const f = await fileFixture(t);
+  const card = readCardPng(f.pngPath); card.data.character_book = null; card.data.extensions.world = '';
+  fs.writeFileSync(f.pngPath, embedChara(fs.readFileSync(f.pngPath), card));
+  const original = fs.readFileSync(f.pngPath);
+  const project = await f.service.control({ action: 'attach', cardFile: 'A.png' }); assert.equal(project.attached, true);
+  assert.deepEqual(fs.readFileSync(f.pngPath), original);
+  assert.equal((await f.service.control({ action: 'diff', projectId: project.id })).clean, true);
+  assert.deepEqual(fs.readdirSync(f.cardsRoot).filter(n => n.startsWith('.attach-')), []);
+});
 test('import restore requires preview/confirmation, rebuilds actual baseline and stays paused', async t => {
   const f = await fileFixture(t); const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
   const project = f.service.getProject(p.id), before = await f.adapter.snapshot(project), statePath = path.join(project.dir, '.card-forge', 'tavern-sync.json');

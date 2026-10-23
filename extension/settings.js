@@ -85,14 +85,14 @@ export function mountSettings({ client, getContext }) {
           <div class="ttcb-backup-policy">
             <label class="checkbox_label"><input data-role="backup-before-overwrite" type="checkbox" checked><small>每次覆盖写入前自动备份（常驻开关；关闭后直接覆盖需自担数据丢失责任）</small></label>
             <div class="flex-container">
-              <input data-role="backup-dir" type="text" class="flex1" placeholder="自定义备份位置（留空默认保存在 cards\backups\&lt;卡名&gt;\ 下）" aria-label="自定义备份位置" autocomplete="off">
+              <input data-role="backup-dir" type="text" class="flex1" placeholder="自定义备份位置（留空默认保存在 工作区目录\\backups\\&lt;卡名&gt;\\ 下）" aria-label="自定义备份位置" autocomplete="off">
               ${icon('set-backup-dir', 'fa-floppy-disk', '保存备份位置', '保存默认自定义备份文件夹路径')}
             </div>
           </div>
           <hr>
           <b>① 拆解当前卡</b>
           <small data-role="current-card"></small>
-          <small>把酒馆当前打开的角色卡拆到工作区目录（<code>cards\&lt;卡名&gt;\</code>），卡绑定的世界书一起放进卡文件夹。只处理当前打开的这一张。</small>
+          <small>把酒馆当前打开的角色卡拆到工作区目录（<code>工作区目录\\&lt;卡名&gt;\\</code>），卡绑定的世界书一起放进卡文件夹。只处理当前打开的这一张。</small>
           <div data-role="frameworks"></div>
           <div data-role="extras"></div>
           <div class="flex-container">
@@ -250,7 +250,7 @@ export function mountSettings({ client, getContext }) {
         }
         const cardMatched = card && (state?.projects ?? []).find(p => p.cardFile && p.cardFile.toLowerCase() === card.avatar?.toLowerCase());
         find('current-card').textContent = card
-            ? `酒馆当前卡：${card.name}（${card.avatar}） · ${cardMatched ? `已拆到 cards\\${cardMatched.id}` : '还没拆到工作区'}`
+            ? `酒馆当前卡：${card.name}（${card.avatar}） · ${cardMatched ? `已拆到工作区「${cardMatched.id}」` : '还没拆到工作区'}`
             : '先在酒馆选择一张角色卡；群聊中不能拆解当前卡。';
         // Preview-specific controls also need a live service, not just a loaded extension.
         for (const node of root.querySelectorAll('[data-service-action]')) node.disabled = busy || !state;
@@ -321,7 +321,7 @@ export function mountSettings({ client, getContext }) {
             } else if (!activeWorld.exists) {
                 const opt = element('option', `（找不到世界书文件：${activeWorld.worldName}）`); opt.value = ''; wSelect.append(opt);
             } else {
-                const opt = element('option', `${activeWorld.worldName}${activeWorld.attached ? `（已拆到 cards\\${activeWorld.projectId ?? activeWorld.worldName}）` : ''}`);
+                const opt = element('option', `${activeWorld.worldName}${activeWorld.attached ? `（已拆到工作区「${activeWorld.projectId ?? activeWorld.worldName}」）` : ''}`);
                 opt.value = activeWorld.worldName; wSelect.append(opt);
                 wSelect.value = activeWorld.worldName;
             }
@@ -495,14 +495,14 @@ export function mountSettings({ client, getContext }) {
             await attachWithConflictPrompt('attach', { cardFile: card.avatar, keep }, card.name);
             lastFollowedCard = undefined;
             await checkCardFollow();
-            find('diff').replaceChildren(element('p', `已把「${card.name}」拆到 cards\\${card.avatar.replace(/\.png$/i, '')}${keep.length ? `（${keep.length} 项留在 card.md）` : ''}。`));
+            find('diff').replaceChildren(element('p', `已把「${card.name}」拆到工作区「${card.avatar.replace(/\.png$/i, '')}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}。`));
         },
         'attach-world': async () => {
             const worldName = find('worlds').value;
             if (!worldName) throw new Error('先在酒馆的世界书编辑器里打开要拆的那本世界书。');
             if (worldName !== currentWorldName()) throw new Error('世界书编辑器里打开的世界书已经换了，请稍等面板刷新后再点。');
             await attachWithConflictPrompt('attachWorld', { worldName }, worldName);
-            find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到 cards\\${worldName}`));
+            find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」`));
         },
         'import-workspace': async () => {
             const p = assembleTarget();
@@ -549,7 +549,7 @@ export function mountSettings({ client, getContext }) {
             const backupDir = find('backup-dir').value.trim();
             const res = await client.control('setBackupDir', { backupDir });
             find('backup-dir').value = res.backupDir;
-            find('diff').replaceChildren(element('p', res.backupDir ? `已保存自定义备份位置：${res.backupDir}` : '已恢复默认备份位置（cards\\backups\\<卡名>\\）。'));
+            find('diff').replaceChildren(element('p', res.backupDir ? `已保存自定义备份位置：${res.backupDir}` : '已恢复默认备份位置（工作区目录\\backups\\<卡名>\\）。'));
         },
         'skills-status': async () => {
             const res = await client.control('skillsStatus');
