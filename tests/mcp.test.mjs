@@ -91,8 +91,11 @@ test('card tools always force backup and only disassemble the open card', async 
   const { tools, service, calls } = fixture(t);
   await rejects(tools.disassemble_card({}), 'NO_ACTIVE_CARD');
   service.state.activeCardFile = 'A.png'; service.state.autoBackupBeforeOverwrite = false;
-  await tools.disassemble_card({ overwrite: true });
-  await tools.sync_now({ projectId: 'A' });
+  const dis = await tools.disassemble_card({ overwrite: true });
+  assert.equal(dis.roundTrip.ok, true);
+  assert.ok(Array.isArray(dis.next_actions));
+  const syn = await tools.sync_now({ projectId: 'A' });
+  assert.ok(Array.isArray(syn.next_actions));
   assert.equal('assemble_card' in tools, false);
   assert.deepEqual(calls.map(c => [c.action, c.skipBackup]), [['attach', false], ['sync', false]]);
   assert.equal(calls[0].cardFile, 'A.png');
@@ -123,6 +126,10 @@ test('JSON-RPC: initialize, tools/list, tools/call errors, notifications', async
   assert.ok(!list.result.tools.some(x => /exec|command|shell/.test(x.name)));
   const bad = await h({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'read_file', arguments: { path: '../x' } } });
   assert.equal(bad.result.isError, true); assert.match(bad.result.content[0].text, /INVALID_PATH/);
+  const noHash = await h({ jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'write_file', arguments: { path: 'A/card.md', content: 'x' } } });
+  assert.equal(noHash.result.isError, true);
+  assert.match(noHash.result.content[0].text, /BASE_HASH_REQUIRED/);
+  assert.match(noHash.result.content[0].text, /hint/);
   assert.equal((await h({ jsonrpc: '2.0', id: 4, method: 'nope' })).error.code, -32601);
 });
 

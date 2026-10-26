@@ -277,9 +277,10 @@ export class SyncService {
           if (this.projects().some(other => (!body.overwrite || other.id !== id) && targetOccupied(other, body.cardFile))) fail('ATTACH_CONFLICT', '卡已由其他工程接管');
           // keep：拆前清单里选了“留在卡里”的项；结果记进这张卡自己的 bridge.json
           const keep = Array.isArray(body.keep) ? body.keep.map(String) : undefined;
-          await this.adapter.attach(p, { overwrite: Boolean(body.overwrite), ...this.backupOptions(body), ...(keep ? { keep } : {}) });
+          const attachRes = await this.adapter.attach(p, { overwrite: Boolean(body.overwrite), ...this.backupOptions(body), ...(keep ? { keep } : {}) });
           this.writeBinding(p, { detached: false, paused: false, ...(keep ? { extrasKeep: keep } : {}) });
-          this.record('attach', id, { cardFile: p.cardFile }); return this.publicProject(this.getProject(id));
+          this.record('attach', id, { cardFile: p.cardFile });
+          return { ...this.publicProject(this.getProject(id)), ...(attachRes?.roundTrip ? { roundTrip: attachRes.roundTrip } : {}) };
         }
         case 'scanCard': {
           segment(body.cardFile, '卡文件名');

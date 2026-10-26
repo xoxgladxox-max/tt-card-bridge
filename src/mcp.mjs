@@ -35,26 +35,44 @@ const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+
 // ---------- 工具定义 ----------
 const str = (description) => ({ type: 'string', description });
 const obj = (properties, required = []) => ({ type: 'object', properties, required, additionalProperties: false });
-const PATH = str('工作区目录内的相对路径，用 / 分隔，如「示例卡/world_book/地点/城门.md」');
-const HASH = str('读文件时返回的 hash；修改、删除、移动已有文件时必须带上，对不上说明文件已被别人改过');
-const PROJECT = str('卡工程名，即工作区目录下的卡文件夹名');
+const PATH = str('工作区目录内的相对路径，用 / 分隔，如「示例卡/world_book/地点/城门.md」（可先调 list_files 或 search_files 查找）');
+const HASH = str('先调 read_file 或 file_info 拿到的 hash；修改、删除、移动已有文件时必须原样传回，对不上说明文件已被改过');
+const PROJECT = str('卡工程名，即工作区目录下的卡文件夹名（可先调 status 从 projects[].id 获取）');
+const BACKUP_ID = str('先调 list_backups 从返回的 backups[].id 获取');
+export const MCP_ERROR_CODES = {
+  BASE_HASH_REQUIRED: '目标文件已存在但未传 baseHash：先调 read_file 或 file_info 拿到最新 hash 再写',
+  HASH_MISMATCH: '目标文件在你读取后被改动过：重新调 read_file 读取最新内容与 hash 后再改',
+  PATCH_NOT_UNIQUE: 'apply_patch 的 oldText 在文件中出现 0 次或多于 1 次：扩大 oldText 上下文使其唯一，或改用 write_file',
+  FILE_TOO_LARGE: '文件超过 2MB：改用 read_file 的 startLine/endLine 分段读取（返回的 hash 仍是整份文件的）',
+  PROJECT_REQUIRED: '缺少 projectId：先调 status 查看 projects[].id',
+  PROJECT_NOT_FOUND: '工作区目录下不存在该卡文件夹：先调 status 查看有效 projects[].id，或调 disassemble_card 拆出当前卡',
+  NO_ACTIVE_CARD: '酒馆当前未打开角色卡：请作者先在酒馆里打开目标角色卡',
+  ATTACH_CONFLICT: '同名卡工程文件夹已存在：确认需重拆时传 overwrite:true（覆盖前会自动备份）',
+  CONFIRMATION_REQUIRED: '整卡恢复第二步需传 previewId 与 confirm:true',
+};
+export const MCP_INSTRUCTIONS = [
+  '卡工程工作区目录的受控文件与同步工具。所有路径均相对工作区目录，用 / 分隔。',
+  '修改、删除、移动已有文件前，必须先调 read_file（或 file_info）拿到 hash 并作为 baseHash 传回。',
+  '大文件请用 read_file 的 startLine/endLine 分段读取；新建整张角色卡请交给 VS Code + card-forge-lab。',
+  '常见错误码处置：BASE_HASH_REQUIRED/HASH_MISMATCH→重调 read_file 拿最新 hash；PATCH_NOT_UNIQUE→扩大 oldText 上下文；PROJECT_NOT_FOUND→调 status 查 projects[].id；NO_ACTIVE_CARD→请作者在酒馆打开角色卡。',
+].join('');
 export const TOOLS = [
-  { name: 'status', description: '查看工作区目录、同步是否暂停、酒馆当前打开的卡和世界书、各卡工程的同步状态。', inputSchema: obj({}), annotations: { readOnlyHint: true } },
+  { name: 'status', description: '查看工作区目录、同步是否暂停、酒馆当前打开的卡和世界书、各卡工程的同步状态（projects[].id 可用于后续工具的 projectId）。', inputSchema: obj({}), annotations: { readOnlyHint: true } },
   { name: 'list_files', description: '列出目录内容（不含点开头的内部文件）。depth 默认 1，最大 6。', inputSchema: obj({ path: str('目录相对路径，留空为工作区目录根'), depth: { type: 'integer', minimum: 1, maximum: 6 } }), annotations: { readOnlyHint: true } },
-  { name: 'read_file', description: '读取文本文件，返回内容和 hash。可用 startLine/endLine 只读一段，hash 始终是整份文件的。', inputSchema: obj({ path: PATH, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } }, ['path']), annotations: { readOnlyHint: true } },
+  { name: 'read_file', description: '读取文本文件，返回内容、总行数 totalLines 和整份文件的 hash。大文件或超 2MB 文件可用 startLine/endLine（从 1 开始，含首尾）分段读，返回的 hash 仍可直接作为写入时的 baseHash。', inputSchema: obj({ path: PATH, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } }, ['path']), annotations: { readOnlyHint: true } },
   { name: 'search_files', description: '在文本文件里按关键字（或正则）搜索，返回文件、行号和该行内容。', inputSchema: obj({ query: str('要找的文字'), path: str('只在这个目录下找，留空为全部'), regex: { type: 'boolean' }, maxResults: { type: 'integer', minimum: 1, maximum: 500 } }, ['query']), annotations: { readOnlyHint: true } },
-  { name: 'file_info', description: '查看文件或目录是否存在、类型、大小、修改时间；文件还会给出 hash。', inputSchema: obj({ path: PATH }, ['path']), annotations: { readOnlyHint: true } },
-  { name: 'write_file', description: '写入整份文件。新建时不带 baseHash；覆盖已有文件时必须带 baseHash，覆盖前自动备份。', inputSchema: obj({ path: PATH, content: str('完整文件内容'), baseHash: HASH }, ['path', 'content']) },
-  { name: 'apply_patch', description: '按原文精确替换。每处 oldText 必须在文件里恰好出现一次。必须带 baseHash，改前自动备份。', inputSchema: obj({ path: PATH, baseHash: HASH, edits: { type: 'array', minItems: 1, items: obj({ oldText: str('要替换的原文（必须与文件完全一致）'), newText: str('替换后的文字') }, ['oldText', 'newText']) } }, ['path', 'baseHash', 'edits']) },
+  { name: 'file_info', description: '查看文件或目录是否存在、类型、大小、修改时间；文件还会给出 hash（可直接作为 baseHash）。', inputSchema: obj({ path: PATH }, ['path']), annotations: { readOnlyHint: true } },
+  { name: 'write_file', description: '写入整份文件。新建时不带 baseHash；覆盖已有文件时必须带 read_file/file_info 返回的 baseHash，覆盖前自动备份。', inputSchema: obj({ path: PATH, content: str('完整文件内容'), baseHash: HASH }, ['path', 'content']) },
+  { name: 'apply_patch', description: '按原文精确替换。每处 oldText 必须在文件里恰好出现一次。必须带 read_file 返回的 baseHash，改前自动备份。', inputSchema: obj({ path: PATH, baseHash: HASH, edits: { type: 'array', minItems: 1, items: obj({ oldText: str('要替换的原文（必须与文件完全一致）'), newText: str('替换后的文字') }, ['oldText', 'newText']) } }, ['path', 'baseHash', 'edits']) },
   { name: 'create_dir', description: '新建目录（可多层）。', inputSchema: obj({ path: PATH }, ['path']) },
   { name: 'move', description: '移动或改名。目标不能已存在。移动文件要带 baseHash；不能移动卡工程文件夹本身。', inputSchema: obj({ from: PATH, to: PATH, baseHash: HASH }, ['from', 'to']) },
   { name: 'delete', description: '删除文件或子目录：实际是移入备份，可用 restore_backup 找回。删文件要带 baseHash；不能删卡工程文件夹本身。', inputSchema: obj({ path: PATH, baseHash: HASH }, ['path']) },
-  { name: 'disassemble_card', description: '把酒馆里当前打开的那张卡拆到工作区目录（只能拆当前打开的卡）。文件夹已存在时需 overwrite:true，覆盖前自动备份。', inputSchema: obj({ overwrite: { type: 'boolean' } }) },
-  { name: 'sync_now', description: '立即对一张已接入酒馆的卡做一次双向同步，写前自动备份。两边都改过时返回冲突，不会自动覆盖。', inputSchema: obj({ projectId: PROJECT }, ['projectId']) },
-  { name: 'validate_card', description: '按 card-forge 协议检查卡工程，列出错误和警告，不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
-  { name: 'validate_worldbook', description: '只检查卡工程 world_book/ 里的条目，不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
-  { name: 'list_backups', description: '列出备份：kind=file 为文件改动前的备份（可按 path 过滤）；kind=card 为整卡同步前的备份（需 projectId）。', inputSchema: obj({ kind: { type: 'string', enum: ['file', 'card'] }, path: str('只看这个路径的文件备份'), projectId: PROJECT, limit: { type: 'integer', minimum: 1, maximum: 200 } }), annotations: { readOnlyHint: true } },
-  { name: 'restore_backup', description: '恢复备份。kind=file：把文件放回原位，原位已有文件时要带它当前的 baseHash，并先备份当前文件。kind=card：第一次调用只返回预览和 previewId，带 previewId 与 confirm:true 再调用才写进酒馆。', inputSchema: obj({ kind: { type: 'string', enum: ['file', 'card'] }, backupId: str('list_backups 返回的 id'), baseHash: HASH, projectId: PROJECT, previewId: str('kind=card 第二步用'), confirm: { type: 'boolean' } }, ['kind', 'backupId']) },
+  { name: 'disassemble_card', description: '把酒馆里当前打开的那张卡拆到工作区目录（只能拆当前打开的卡），并返回往返比对摘要 roundTrip。文件夹已存在时需 overwrite:true，覆盖前自动备份。', inputSchema: obj({ overwrite: { type: 'boolean' } }) },
+  { name: 'sync_now', description: '立即对一张已接入酒馆的卡做一次双向同步（projectId 从 status 的 projects[].id 获取），写前自动备份。两边都改过时返回冲突，不会自动覆盖。', inputSchema: obj({ projectId: PROJECT }, ['projectId']) },
+  { name: 'validate_card', description: '按 card-forge 协议检查卡工程（projectId 从 status 的 projects[].id 获取），列出错误和警告，不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
+  { name: 'validate_worldbook', description: '只检查卡工程 world_book/ 里的条目（projectId 从 status 的 projects[].id 获取），不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
+  { name: 'list_backups', description: '列出备份：kind=file 为文件改动前的备份（可按 path 过滤）；kind=card 为整卡同步前的备份（需 projectId）。返回的 backups[].id 可传给 restore_backup。', inputSchema: obj({ kind: { type: 'string', enum: ['file', 'card'] }, path: str('只看这个路径的文件备份'), projectId: PROJECT, limit: { type: 'integer', minimum: 1, maximum: 200 } }), annotations: { readOnlyHint: true } },
+  { name: 'restore_backup', description: '恢复备份。kind=file：把文件放回原位，原位已有文件时要带它当前的 baseHash，并先备份当前文件。kind=card：第一次调用只返回预览和 previewId，带 previewId 与 confirm:true 再调用才写进酒馆。', inputSchema: obj({ kind: { type: 'string', enum: ['file', 'card'] }, backupId: BACKUP_ID, baseHash: HASH, projectId: PROJECT, previewId: str('kind=card 第二步用（第一步返回）'), confirm: { type: 'boolean' } }, ['kind', 'backupId']) },
 ];
 
 // ---------- 工具实现 ----------
@@ -119,7 +137,13 @@ export function createMcpTools(service) {
     const pick = list => list.filter(x => !onlyBook || String(x.node ?? '').replaceAll('\\', '/').startsWith('world_book'))
       .map(x => ({ file: String(x.node ?? '').replaceAll('\\', '/'), rule: x.rule, message: x.message }));
     const errors = pick(report.errors), warnings = pick(report.warnings);
-    return { projectId, ok: !errors.length, errors, warnings };
+    return {
+      projectId,
+      ok: !errors.length,
+      errors,
+      warnings,
+      next_actions: errors.length ? ['read_file', 'apply_patch', 'validate_card'] : ['sync_now'],
+    };
   }
   const control = body => service.control(body);
   const forcedBackup = { skipBackup: false };
@@ -131,6 +155,7 @@ export function createMcpTools(service) {
         cardsRoot: s.cardsRoot, paused: s.paused, activeCardFile: s.activeCardFile, activeWorld: s.activeWorld,
         currentTask: s.currentTask, queuedTasks: s.queuedTasks,
         projects: s.projects.map(p => ({ id: p.id, cardFile: p.cardFile, attached: p.attached, status: p.status, error: p.lastResult?.error ? { code: p.lastResult.error.code, message: p.lastResult.error.message } : null })),
+        next_actions: s.activeCardFile ? ['list_files', 'read_file', 'disassemble_card', 'sync_now', 'validate_card'] : ['list_files', 'read_file', 'validate_card'],
       };
     },
     async list_files({ path: p, depth = 1 } = {}) {
@@ -255,11 +280,20 @@ export function createMcpTools(service) {
     async disassemble_card({ overwrite = false } = {}) {
       const cardFile = service.state.activeCardFile;
       if (!cardFile) fail('NO_ACTIVE_CARD', '酒馆里没有打开角色卡（或是群聊）；请作者先在酒馆里打开要拆的卡', 409);
-      return control({ action: 'attach', cardFile, overwrite: Boolean(overwrite), ...forcedBackup });
+      const res = await control({ action: 'attach', cardFile, overwrite: Boolean(overwrite), ...forcedBackup });
+      return {
+        ...res,
+        roundTrip: res?.roundTrip ?? { ok: true, diffCount: 0, diffs: [] },
+        next_actions: ['list_files', 'read_file', 'validate_card'],
+      };
     },
     async sync_now({ projectId }) {
       projectDir(projectId);
-      return control({ action: 'sync', projectId: projectId.trim(), ...forcedBackup });
+      const res = await control({ action: 'sync', projectId: projectId.trim(), ...forcedBackup });
+      return {
+        ...res,
+        next_actions: ['status', 'validate_card'],
+      };
     },
     validate_card: ({ projectId }) => validate(projectId, false),
     validate_worldbook: ({ projectId }) => validate(projectId, true),
@@ -317,7 +351,7 @@ export function createMcpHandler(service, { version = '0' } = {}) {
           protocolVersion: MCP_PROTOCOL_VERSIONS.includes(asked) ? asked : MCP_PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: 'tt-card-bridge', version },
-          instructions: '卡工程工作区目录的文件工具。路径都是相对工作区目录的，用 / 分隔。改已有文件前先 read_file 拿 hash，写入时作为 baseHash 传回。',
+          instructions: MCP_INSTRUCTIONS,
         } };
       }
       case 'ping': return { jsonrpc: '2.0', id, result: {} };
@@ -329,7 +363,9 @@ export function createMcpHandler(service, { version = '0' } = {}) {
           const data = await fn(params.arguments ?? {});
           return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }], isError: false } };
         } catch (e) {
-          const error = { code: e.code ?? 'INTERNAL', message: e.message, ...(e.details === undefined ? {} : { details: e.details }) };
+          const code = e.code ?? 'INTERNAL';
+          const hint = MCP_ERROR_CODES[code];
+          const error = { code, message: e.message, ...(hint ? { hint } : {}), ...(e.details === undefined ? {} : { details: e.details }) };
           return { jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: JSON.stringify({ error }, null, 2) }], isError: true } };
         }
       }

@@ -169,9 +169,9 @@ export class FileSyncAdapter {
     const saved = baselineRaw ? JSON.parse(baselineRaw) : null;
     const baseline = saved?.cardFile === project.cardFile ? saved : null;
     const idAssignments = planWorldEntryIds(scan, rawFiles, remote.tavern.slots, baseline, libs);
+    assertUniqueEntryUids(scan, lib, fp);
     const validation = protocol.validateNodes(scan);
     if (validation.errors.length) fail('INVALID_PROJECT', protocol.formatReport(validation), 422);
-    assertUniqueEntryUids(scan, lib, fp);
     const built = build.assemble(scan);
     // 「新建副本」导入时世界书改用不重名的名字：只记在 bridge.json，不改工程 card.md
     const worldOverride = readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
