@@ -9,7 +9,9 @@ export function compareSnapshot(snapshot) {
     const n = nodes.slots[key], t = tavern.slots[key];
     if (!n && !t?.value && key.startsWith('field:')) continue;
     let kind = 'equal';
-    const newEntry = !!n && !t && key.startsWith('entry:') && n.newEntryEligible === true && snapshot.baselineReliable === true && !Object.hasOwn(baseline.slots, key) && !Object.hasOwn(baseline.pending ?? {}, key);
+    const unrecorded = snapshot.baselineReliable === true && !Object.hasOwn(baseline.slots, key) && !Object.hasOwn(baseline.pending ?? {}, key);
+    const newEntry = !!n && !t && ((key.startsWith('entry:') && n.newEntryEligible === true) || key.startsWith('greeting:')) && unrecorded;
+    const remoteNewEntry = !n && !!t && (key.startsWith('entry:') || key.startsWith('greeting:')) && unrecorded;
     // 正则、脚本、变量：一边没有时按基线判断是哪边新增、哪边删除
     const extra = /^(regex|script):|^(vars|xbtasks)$/.test(key);
     const base0 = baseline?.slots?.[key];
@@ -19,7 +21,7 @@ export function compareSnapshot(snapshot) {
       else if (base0 === slotHash(has.value)) kind = n ? 'tavern' : 'project';
       else kind = 'conflict';
     }
-    else if (!n) kind = 'added';
+    else if (!n) kind = remoteNewEntry ? 'tavern' : 'added';
     else if (!t) kind = newEntry ? 'project' : 'removed';
     else if (n.value !== t.value) {
       const base = baseline?.slots?.[key];
@@ -29,9 +31,17 @@ export function compareSnapshot(snapshot) {
       else if (base === slotHash(t.value)) kind = 'project';
       else kind = 'conflict';
     }
-    if (n?.settings !== undefined && t?.settings !== undefined && n.settings !== t.settings) issues.push({ kind: 'settings', key, message: `条目设置不同：${n.label}` });
+    const settingsChanged = n?.settingsChanged ?? t?.settingsChanged ?? null;
+    if (settingsChanged && kind === 'equal') {
+      kind = settingsChanged;
+    }
+    if (n?.settings !== undefined && t?.settings !== undefined && n.settings !== t.settings && !settingsChanged) {
+      if (!issues.some(i => i.kind === 'settings' && i.key === key)) {
+        issues.push({ kind: 'settings', key, message: `条目设置不同：${n.label}` });
+      }
+    }
     if (kind === 'added' || kind === 'removed') issues.push({ kind, key, message: `${kind === 'added' ? '酒馆新增或工程缺少' : '酒馆删除或工程新增'}槽位：${n?.label ?? t?.label}` });
-    slots.push({ key, label: n?.label ?? t?.label ?? key, node: n?.value ?? null, tavern: t?.value ?? null, kind, canResolve: extra || (!!n && !!t), ...(newEntry ? { newEntry: true } : {}), ...(extra ? { extra: true } : {}) });
+    slots.push({ key, label: n?.label ?? t?.label ?? key, node: n?.value ?? null, tavern: t?.value ?? null, kind, canResolve: extra || (!!n && !!t), ...(newEntry ? { newEntry: true } : {}), ...(remoteNewEntry ? { remoteNewEntry: true } : {}), ...(settingsChanged ? { settingsChanged } : {}), ...(extra ? { extra: true } : {}) });
   }
   return { revision: snapshot.revision, clean: !issues.length && slots.every(s => s.kind === 'equal'), slots, issues, idAssignments: (snapshot.idAssignments ?? []).map(({ relPath, id, uid }) => ({ relPath, id, uid })) };
 }
@@ -74,22 +84,31 @@ export class SyncEngine {
       if (s.kind === 'equal') continue;
       if (replaceRemote && s.kind === 'added') { needsPush = true; continue; }
       const value = chosen.has(s.key) ? chosen.get(s.key) : s.kind === 'tavern' && direction !== 'push' && !replaceRemote ? s.tavern : s.node;
-      if (value !== s.node) updates.push({ key: s.key, value });
-      if (value !== s.tavern && direction !== 'pull') needsPush = true;
+      const pullSettings = s.settingsChanged === 'tavern' && direction !== 'push' && !replaceRemote;
+      const pushSettings = s.settingsChanged === 'project' && direction !== 'pull';
+      if (value !== s.node || pullSettings) {
+        updates.push({
+          key: s.key,
+          value,
+          ...(pullSettings || s.remoteNewEntry ? { remoteEntry: before.tavern.slots[s.key]?.remoteEntry ?? null } : {}),
+        });
+      }
+      if ((value !== s.tavern || pushSettings) && direction !== 'pull') needsPush = true;
     }
     const backupId = skipBackup ? null : await this.adapter.backup(project, before, { backupDir });
     // Recheck after backing up, before the first mutation. Transport also checks expected remote data.
     if ((await this.adapter.snapshot(project)).revision !== before.revision) fail('STALE_PREVIEW', '备份时内容改变；没有写入');
     const plannedNodes = nodeSignature(before, updates);
     const plannedLocal = await this.adapter.writeBodies(project, before, updates);
+    const hasMetaUpdates = updates.some(u => u.remoteEntry || !before.nodes.slots[u.key]);
     if (needsPush) {
       const prepared = await this.adapter.snapshot(project);
-      if (nodeSignature(prepared) !== plannedNodes || (plannedLocal && prepared.localHash !== plannedLocal)) fail('STALE_LOCAL', '决定后本地文件又改变；没有推送未经预览的内容');
+      if ((plannedLocal ? prepared.localHash !== plannedLocal : nodeSignature(prepared) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(prepared) !== plannedNodes)) fail('STALE_LOCAL', '决定后本地文件又改变；没有推送未经预览的内容');
       if (JSON.stringify(prepared.expected) !== JSON.stringify(before.expected)) fail('STALE_REMOTE', '酒馆内容已改变；节点修改已备份，未推送');
       await this.adapter.push(project, prepared);
     }
     const after = await this.adapter.snapshot(project);
-    if (nodeSignature(after) !== plannedNodes || (plannedLocal && after.localHash !== plannedLocal)) fail('STALE_LOCAL', '操作期间工程改变；没有更新同步基线');
+    if ((plannedLocal ? after.localHash !== plannedLocal : nodeSignature(after) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(after) !== plannedNodes)) fail('STALE_LOCAL', '操作期间工程改变；没有更新同步基线');
     diff = compareSnapshot(after);
     if (direction !== 'pull' && !diff.clean) fail('VERIFY_FAILED', '写入后查对仍不一致；未更新基线', 409, diff);
     await this.adapter.saveBaseline(project, after, diff.clean);

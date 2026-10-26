@@ -406,7 +406,7 @@ export class SyncService {
           const refreshed = this.getProject(p.id, { preferAssemble: true });
           const syncRes = await this.perform(refreshed, {
             ...(initializeExpected ? { initializeExpected } : { force: true, direction: 'push' }),
-            replaceRemote: Boolean(body.overwrite && !body.createNewCopy),
+            replaceRemote: Boolean((body.overwrite && !body.createNewCopy) || p.attached),
             ...backupOpts,
           });
           this.record('importFromWorkspace', refreshed.id, { status: syncRes.status });

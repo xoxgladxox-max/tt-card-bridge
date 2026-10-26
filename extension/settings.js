@@ -493,21 +493,23 @@ export function mountSettings({ client, getContext }) {
             if (!card) throw new Error('先在酒馆选择一张角色卡。');
             const keep = keptExtras();
             await attachWithConflictPrompt('attach', { cardFile: card.avatar, keep }, card.name);
+            if (state?.paused !== false) state = await client.control('resume');
             lastFollowedCard = undefined;
             await checkCardFollow();
-            find('diff').replaceChildren(element('p', `已把「${card.name}」拆到工作区「${card.avatar.replace(/\.png$/i, '')}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}。`));
+            find('diff').replaceChildren(element('p', `已把「${card.name}」拆到工作区「${card.avatar.replace(/\.png$/i, '')}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}，已开启实时双向同步。`));
         },
         'attach-world': async () => {
             const worldName = find('worlds').value;
             if (!worldName) throw new Error('先在酒馆的世界书编辑器里打开要拆的那本世界书。');
             if (worldName !== currentWorldName()) throw new Error('世界书编辑器里打开的世界书已经换了，请稍等面板刷新后再点。');
             await attachWithConflictPrompt('attachWorld', { worldName }, worldName);
-            find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」`));
+            if (state?.paused !== false) state = await client.control('resume');
+            find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」，已开启实时双向同步。`));
         },
         'import-workspace': async () => {
             const p = assembleTarget();
             if (!p) { importNote('工作区目录里没有可导入的卡工程，或下拉框没有选中。', true); return; }
-            importNote(`正在合成「${p.id}」并导入酒馆…`);
+            importNote(`正在合成「${p.id}」并写入酒馆…`);
             const send = extra => client.control('importFromWorkspace', { projectId: p.id, ...extra });
             let res;
             try {
@@ -515,27 +517,28 @@ export function mountSettings({ client, getContext }) {
                     res = await send({});
                 } catch (error) {
                     if (error?.code !== 'ATTACH_CONFLICT') throw error;
-                    const copy = await askConfirm(
-                        `${error.message}\n\n「新建一张」：像酒馆导入重名卡一样自动加编号，原有的卡和世界书都不动。\n「不新建」：接着问是否覆盖。`,
-                        '新建一张', '不新建',
+                    const over = await askConfirm(
+                        `${error.message}\n\n「覆盖并绑定同名卡」：直接更新酒馆里的同名卡/世界书并开启实时双向同步（会按上方备份设置先备份，不会生成 1.png、2.png）。\n「另建新副本」：保留原卡不动，或者取消。`,
+                        '覆盖并绑定同名卡', '另建新副本 / 取消',
                     );
-                    if (copy) {
-                        importNote('正在新建卡并写入内容…');
-                        res = await send({ createNewCopy: true });
-                    } else {
-                        const over = await askConfirm(`是否用「${p.id}」的内容覆盖酒馆里的同名卡和世界书？\n（会按上方备份设置先备份）`, '覆盖', '取消');
-                        if (!over) { importNote('已取消，没有导入。'); return; }
+                    if (over) {
                         const backupOpts = overwriteBackupOptions(`用「${p.id}」覆盖酒馆同名卡`);
-                        importNote('正在覆盖导入…');
+                        importNote('正在覆盖并绑定同名卡…');
                         res = await send({ overwrite: true, ...backupOpts });
+                    } else {
+                        const copy = await askConfirm(`是否将「${p.id}」另存为带编号的新副本（如 1.png、2.png），原有的卡和世界书都不动？`, '新建副本', '取消');
+                        if (!copy) { importNote('已取消，没有导入。'); return; }
+                        importNote('正在新建卡副本并写入内容…');
+                        res = await send({ createNewCopy: true });
                     }
                 }
             } catch (error) {
                 importNote(`导入失败：${errorText(error)}`, true);
                 throw error;
             }
+            if (state?.paused !== false) state = await client.control('resume');
             const made = res?.project?.cardFile ? `（酒馆里的卡文件：${res.project.cardFile}）` : '';
-            importNote(`已把「${p.id}」合成并导入酒馆${made}。`);
+            importNote(`已把「${p.id}」写入酒馆${made}，已开启实时双向同步。`);
         },
         'set-cards-root': async () => {
             const cardsRoot = find('cards-root-input').value.trim();

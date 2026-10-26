@@ -198,25 +198,50 @@ export class FileSyncAdapter {
     // Also inspect entry options outside the legacy slot settings subset (group, recursion, etc.).
     const effective = remote.worldRaw ? unpack.worldFileToCard(JSON.parse(remote.worldRaw), remote.worldName) : remote.tavern.card;
     const remoteEntries = new Map((effective?.data?.character_book?.entries ?? []).map(e => [String(e.id), e]));
+    for (const [idStr, t] of remoteEntries) {
+      const tSlot = remote.tavern.slots[`entry:${idStr}`];
+      if (tSlot) tSlot.remoteEntry = t;
+    }
+    const entrySettings = {};
     for (const e of built.card.data?.character_book?.entries ?? []) {
+      const key = `entry:${e.id}`;
+      const nSlot = nodes.slots[key];
       const t = remoteEntries.get(String(e.id));
-      if (!t) continue;
       const { content: ignored, ...nSettings } = e;
       // 顶层 position 只有 before_char/after_char 两个值；按深度插入（extensions.position 不是 0/1）时它没有意义，
       // card-forge 装卡写 before_char，酒馆世界书换算回来是 after_char，不算差异。真正的位置看 extensions.position。
       const byDepth = v => v !== undefined && v !== null && Number(v) !== 0 && Number(v) !== 1;
-      if (byDepth(e.extensions?.position) && byDepth(t.extensions?.position)) delete nSettings.position;
+      if (byDepth(e.extensions?.position) && byDepth(t?.extensions?.position)) delete nSettings.position;
+      const nSetHash = hashObject(nSettings);
+      if (!t) continue;
+      const { content: ignoredT, ...tSettings } = t;
+      if (byDepth(e.extensions?.position) && byDepth(t.extensions?.position)) delete tSettings.position;
+      const tSetHash = hashObject(tSettings);
       const names = settingDifferences(nSettings, t);
-      if (names.length) issues.push({ kind: 'settings', key: `entry:${e.id}`, message: `条目设置不同：${names.join('、')}` });
+      entrySettings[key] = { node: nSetHash, tavern: tSetHash, clean: !names.length };
+      if (names.length) {
+        const baseSet = baseline?.settings?.[key];
+        const canAutoSync = reliableBaseline(saved, project.cardFile) && baseSet && (
+          (baseSet.node === nSetHash && baseSet.tavern !== tSetHash) ||
+          (baseSet.tavern === tSetHash && baseSet.node !== nSetHash)
+        );
+        if (canAutoSync) {
+          const dir = baseSet.node === nSetHash ? 'tavern' : 'project';
+          if (nSlot) nSlot.settingsChanged = dir;
+          if (remote.tavern.slots[key]) remote.tavern.slots[key].settingsChanged = dir;
+        } else {
+          issues.push({ kind: 'settings', key, message: `条目设置不同：${names.join('、')}` });
+        }
+      }
     }
-    return { ...remote, ...local, nodes, baseline, baselineReliable: reliableBaseline(saved, project.cardFile), idAssignments, open, resolved, card: built.card, issues,
+    return { ...remote, ...local, nodes, baseline, baselineReliable: reliableBaseline(saved, project.cardFile), entrySettings, idAssignments, open, resolved, card: built.card, issues,
       revision: hashObject({ localHash: local.localHash, expected: remote.expected, operation, open: [...open], resolved: [...resolved] }) };
   }
   async writeBodies(project, snapshot, updates) {
     if (snapshot.localHash !== this.localSnapshot(project).localHash) fail('STALE_PREVIEW', '节点在准备写入时改变');
     const planned = { ...snapshot.rawFiles }, newFiles = new Set(), deleted = new Set();
     for (const assignment of snapshot.idAssignments ?? []) planned[assignment.relPath] = assignment.text;
-    for (const { key, value } of updates) {
+    for (const { key, value, remoteEntry } of updates) {
       if (extrasLib.isExtraKey(key)) { await this.planExtra(project, snapshot, planned, newFiles, deleted, key, value); continue; }
       let rel = snapshot.nodes.slots[key]?.relPath?.replaceAll('\\', '/');
       // 酒馆里写了、本地还没有文件的字段：按新格式位置新建散文件（整文件就是正文）
@@ -226,10 +251,55 @@ export class FileSyncAdapter {
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `字段文件已存在：${rel}`);
         planned[rel] = value.replaceAll('\n', '\n') + '\n'; newFiles.add(rel); continue;
       }
+      // 酒馆里新建的备选开场白：生成 message/<序号>.md
+      if (!rel && key.startsWith('greeting:')) {
+        const idx = Number(key.slice('greeting:'.length)) + 1;
+        const num = String(idx).padStart(2, '0');
+        rel = `message/${idx}.md`;
+        if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `开场白文件已存在：${rel}`);
+        const { unpack } = await this.libraries();
+        const fm = { id: `greet-alt-${num}`, type: 'greeting', target: 'alternate_greetings', title: `备选${num}`, order: idx };
+        planned[rel] = unpack.nodeText(fm, value, '酒馆实时同步');
+        newFiles.add(rel);
+        continue;
+      }
+      // 酒馆里新建的世界书条目：生成 world_book/<标题>.md
+      if (!rel && key.startsWith('entry:') && remoteEntry) {
+        const { unpack } = await this.libraries();
+        const usedNames = new Set(
+          Object.keys(planned)
+            .filter(r => r.startsWith('world_book/') && r.endsWith('.md'))
+            .map(r => path.basename(r, '.md').toLowerCase())
+        );
+        const stem = unpack.safeDirName(remoteEntry.comment || `wb-${remoteEntry.id}`, usedNames);
+        rel = `world_book/${stem}.md`;
+        if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `世界书条目文件已存在：${rel}`);
+        const nodeId = `wb-${remoteEntry.id}`;
+        const fm = unpack.buildEntryFrontmatter(remoteEntry, nodeId, { existingType: 'lore', displayIndex: remoteEntry.extensions?.display_index ?? -1 });
+        planned[rel] = unpack.nodeText(fm, value, '酒馆实时同步');
+        newFiles.add(rel);
+        continue;
+      }
       if (!rel || planned[rel] === undefined) fail('INVALID_SLOT', `没有节点：${key}`, 400);
-      const raw = planned[rel];
+      let raw = planned[rel];
       // 没有开头设置的散文件：整文件就是正文，直接整体替换
       if (!/^\uFEFF?---\r?\n/.test(raw)) { const eol = raw.includes('\r\n') ? '\r\n' : '\n'; planned[rel] = value.replaceAll('\n', eol) + eol; continue; }
+      if (remoteEntry && key.startsWith('entry:')) {
+        const { unpack, YAML } = await this.libraries();
+        const hasBom = raw.charCodeAt(0) === 0xfeff;
+        const clean = hasBom ? raw.slice(1) : raw;
+        const fmMatch = clean.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (fmMatch) {
+          const existingNode = snapshot.nodes.slots[key]?.node;
+          const nodeId = existingNode?.id ?? `wb-${remoteEntry.id}`;
+          const existingType = existingNode?.type ?? 'lore';
+          const displayIndex = snapshot.nodes.slots[key]?.displayIndex ?? -1;
+          const newFm = unpack.buildEntryFrontmatter(remoteEntry, nodeId, { existingType, displayIndex });
+          const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+          const head = YAML.stringify(newFm, { lineWidth: 0 }).trimEnd().replaceAll('\n', eol);
+          raw = `${hasBom ? '\uFEFF' : ''}---${eol}${head}${eol}---${clean.slice(fmMatch[0].length)}`;
+        }
+      }
       const at = raw.indexOf(BODY);
       if (at < 0 || raw.indexOf(BODY, at + BODY.length) >= 0 || value.includes(BODY)) fail('INVALID_BODY', `正文标记不唯一：${rel}`, 422);
       const eol = raw.includes('\r\n') ? '\r\n' : '\n';
@@ -308,8 +378,13 @@ export class FileSyncAdapter {
     for (const key of emptyFields) { slots[key] = slotHash(''); delete pending[key]; }
     // Retain entry hashes as history even when both sides remove the entry: its UID is not new again.
     if (clean) for (const key of Object.keys(slots)) if (!snapshot.nodes.slots[key] && !key.startsWith('entry:') && !emptyFields.has(key)) delete slots[key];
-    if (snapshot.baseline && hashObject(slots) === hashObject(snapshot.baseline.slots ?? {}) && hashObject(pending) === hashObject(snapshot.baseline.pending ?? {})) return;
-    saveSyncState(project.dir, project.cardFile, slots, pending);
+    const settings = { ...(snapshot.baseline?.settings ?? {}) };
+    for (const [key, pair] of Object.entries(snapshot.entrySettings ?? {})) {
+      if (pair.clean) settings[key] = { node: pair.node, tavern: pair.tavern };
+    }
+    if (clean) for (const key of Object.keys(settings)) if (!snapshot.nodes.slots[key]) delete settings[key];
+    if (snapshot.baseline && hashObject(slots) === hashObject(snapshot.baseline.slots ?? {}) && hashObject(pending) === hashObject(snapshot.baseline.pending ?? {}) && hashObject(settings) === hashObject(snapshot.baseline.settings ?? {})) return;
+    saveSyncState(project.dir, project.cardFile, slots, pending, Object.keys(settings).length ? settings : undefined);
   }
   // 备份位置：留空时为 cards/backups/<卡名>/，填了就是 <填的目录>/<卡名>/；每次一个时间子文件夹
   backupRoot(project, backupDir = '') {

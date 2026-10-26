@@ -61,9 +61,13 @@ export function readSlotsFromNodes(scan, fingerprint, nodesLib) {
 // 节点这边的条目设置要装配后才知道（tavern 段会覆盖默认值），由调用方传入装配结果补上
 // 正则、脚本等也从装配结果取；拆成文件的记下文件位置，留在 card.md 的记 kept
 export function attachNodeSettings(nodeSlots, assembledCard, scan = null) {
-  for (const e of assembledCard.data?.character_book?.entries ?? []) {
+  for (const [i, e] of (assembledCard.data?.character_book?.entries ?? []).entries()) {
     const s = nodeSlots.slots[`entry:${e.id}`];
-    if (s) s.settings = settingsOfBook(e);
+    if (s) {
+      s.settings = settingsOfBook(e);
+      s.builtEntry = e;
+      s.displayIndex = i;
+    }
   }
   const ex = scan?.extras ?? { regex: [], scripts: [], vars: null, xbtasks: null };
   const fileOf = new Map([...ex.regex, ...ex.scripts].map(f => [f.key, f]));
@@ -142,8 +146,15 @@ export function loadSyncState(projDir, cardFile) {
   return s?.cardFile === cardFile ? s : null;
 }
 // pending：放进「待归位」的槽位 → { file: 待归位文件相对路径, tavern: 当时酒馆内容指纹 }
-export function saveSyncState(projDir, cardFile, slots, pending = {}) {
-  atomicJson(stateFile(projDir), { cardFile, savedAt: new Date().toISOString(), slots, pending });
+// settings：世界书条目上次两边一致时的设置指纹 { node, tavern }，用于判断是哪一边改了触发词/开关/顺序/深度等设置
+export function saveSyncState(projDir, cardFile, slots, pending = {}, settings = undefined) {
+  atomicJson(stateFile(projDir), {
+    cardFile,
+    savedAt: new Date().toISOString(),
+    slots,
+    pending,
+    ...(settings ? { settings } : {}),
+  });
 }
 
 // 待归位的处理状态。作者删掉待归位文件，就算已经处理完：

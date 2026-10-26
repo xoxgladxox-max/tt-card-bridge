@@ -447,3 +447,42 @@ test('service.json is filled with defaults and bad values are corrected', async 
   assert.equal(s.paused, true); assert.equal(s.pollIntervalMs, 2000); assert.equal(s.autoBackupBeforeOverwrite, false);
   assert.equal(s.activeCardFile, 'A.png'); assert.equal('assembleRoot' in s, false);
 });
+test('bidirectional real-time sync covers worldbook entry settings, Tavern-created entries, and alternate greetings', async t => {
+  const f = await fileFixture(t, true);
+  const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
+  const project = f.service.getProject(p.id);
+  const engine = new SyncEngine(f.adapter);
+  const worldPath = path.join(f.userDir, 'worlds', 'Book.json');
+
+  // 1. Tavern modifies entry settings (keys, constant, order, comment) -> syncs back to .md frontmatter
+  const w1 = JSON.parse(fs.readFileSync(worldPath, 'utf8'));
+  w1.entries[42].key = ['key', 'tavern-kw'];
+  w1.entries[42].constant = true;
+  w1.entries[42].order = 150;
+  fs.writeFileSync(worldPath, JSON.stringify(w1, null, 2));
+  assert.equal((await engine.run(project)).status, 'clean');
+  const entryMdPath = path.join(project.dir, 'world_book', 'entry.md');
+  const md1 = fs.readFileSync(entryMdPath, 'utf8');
+  assert.match(md1, /tavern-kw/);
+  assert.match(md1, /constant:\s*true/);
+  assert.match(md1, /order:\s*150/);
+
+  // 2. Tavern adds a brand new worldbook entry -> creates world_book/<title>.md locally
+  const w2 = JSON.parse(fs.readFileSync(worldPath, 'utf8'));
+  w2.entries[99] = { uid: 99, key: ['remote-new'], keysecondary: [], content: 'Created in Tavern.', comment: 'TavernAdded', constant: false, disable: false, order: 160, position: 0, depth: 4 };
+  fs.writeFileSync(worldPath, JSON.stringify(w2, null, 2));
+  assert.equal((await engine.run(project)).status, 'clean');
+  const newMdPath = path.join(project.dir, 'world_book', 'TavernAdded.md');
+  assert.equal(fs.existsSync(newMdPath), true);
+  assert.match(fs.readFileSync(newMdPath, 'utf8'), /Created in Tavern\./);
+
+  // 3. Tavern adds an alternate greeting -> creates message/1.md locally
+  const c3 = readCardPng(f.pngPath);
+  c3.data.alternate_greetings = ['Hello from Tavern alt greeting!'];
+  fs.writeFileSync(f.pngPath, embedChara(basePng, c3));
+  assert.equal((await engine.run(project)).status, 'clean');
+  const greet1Path = path.join(project.dir, 'message', '1.md');
+  assert.equal(fs.existsSync(greet1Path), true);
+  assert.match(fs.readFileSync(greet1Path, 'utf8'), /Hello from Tavern alt greeting!/);
+});
+
