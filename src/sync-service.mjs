@@ -309,7 +309,13 @@ export class SyncService {
           if (!/\.png$/i.test(body.cardFile)) fail('INVALID_CARD', '只接入 PNG 卡', 400);
           const name = body.cardFile.slice(0, -4); segment(name, '卡名');
           const id = name, p = { id, dir: contained(this.cardsRoot, id), cardFile: body.cardFile, paused: false };
-          if (this.projects().some(other => (!body.overwrite || other.id !== id) && targetOccupied(other, body.cardFile))) fail('ATTACH_CONFLICT', '卡已由其他工程接管');
+          // 被其他工程连着：拒绝。被同名工程自己连着、又没说覆盖：按同名目录处理，带上会替换和会保留的文件清单
+          const occupants = this.projects().filter(other => targetOccupied(other, body.cardFile));
+          if (occupants.some(other => other.id !== id)) fail('ATTACH_CONFLICT', '卡已由其他工程接管');
+          if (occupants.length && !body.overwrite) {
+            const plan = this.adapter.overwritePlan && fs.existsSync(p.dir) ? this.adapter.overwritePlan(p.dir) : null;
+            fail('ATTACH_CONFLICT', '同名工程目录已存在；拒绝覆盖或自动接入', 409, plan ? { replaceCount: plan.replace.length, keepGroups: plan.keepGroups } : undefined);
+          }
           // keep：拆前清单里选了“留在卡里”的项；结果记进这张卡自己的 bridge.json
           const keep = Array.isArray(body.keep) ? body.keep.map(String) : undefined;
           const attachRes = await this.adapter.attach(p, { overwrite: Boolean(body.overwrite), ...this.backupOptions(body), ...(keep ? { keep } : {}) });
@@ -327,7 +333,7 @@ export class SyncService {
           return res;
         }
         case 'rebind': {
-          // 改连：把工程改为连接酒馆里另一张已有的卡（玩家删卡重导后文件名变了）。只改绑定，不写卡、不写工程正文；
+          // 改连：把工程改为连接酒馆里另一张已有的卡（玩家删卡重导后文件名变了）。不写卡；工程文件只在条目编号对不上、作者确认后改 tavern.id。
           // 旧同步记录记的是旧文件名，换了目标后自动失效。两边一致就建立新记录，不一致只列差异交作者选
           segment(body.cardFile, '卡文件名');
           if (!/\.png$/i.test(body.cardFile)) fail('INVALID_CARD', '只能改连 PNG 卡', 400);
@@ -337,6 +343,18 @@ export class SyncService {
           if (!this.cardExists(body.cardFile)) fail('CARD_NOT_FOUND', `酒馆里没有「${body.cardFile}」`, 404);
           if (this.projects().some(o => !sameProjectPath(o.dir, p.dir) && targetOccupied(o, body.cardFile))) fail('ATTACH_CONFLICT', '这张卡已由其他工程连着；先解除那边的绑定');
           const from = p.cardFile;
+          // 条目编号：删卡重导后酒馆重新编了号。按标题和正文配对，标题同、正文不同的先问作者；要改本地编号时先列清单，确认后才写
+          let renumbered = null;
+          if (this.adapter.planRebind) {
+            const choices = body.choices && typeof body.choices === 'object' && !Array.isArray(body.choices) ? body.choices : {};
+            const plan = await this.adapter.planRebind(p, body.cardFile, choices);
+            if (plan.ambiguous.some(a => !['pair', 'separate'].includes(choices[a.relPath]))) return { needsChoice: true, plan };
+            if (plan.changes.length) {
+              if (body.confirm !== true || body.planId !== plan.planId) return { needsConfirm: true, plan };
+              renumbered = await this.adapter.applyRebind(p, plan, this.backupOptions(body));
+              this.record('rebindRenumber', p.id, { count: renumbered.changed.length, backupId: renumbered.backupId });
+            }
+          }
           // projectName 取文件夹名：改连不触发自动改名
           this.writeBinding({ ...p, cardFile: body.cardFile }, { detached: false, paused: false, projectName: p.name });
           this.results.delete(p.id);
@@ -346,10 +364,10 @@ export class SyncService {
           const diff = await this.engine.inspect(refreshed);
           if (diff.clean) {
             const result = await this.perform(refreshed, {});
-            return { project: this.publicProject(this.getProject(p.id)), from, clean: true, sync: result };
+            return { project: this.publicProject(this.getProject(p.id)), from, clean: true, sync: result, renumbered };
           }
           this.results.set(p.id, { status: 'differences', diff: compactDiff(diff) });
-          return { project: this.publicProject(this.getProject(p.id)), from, clean: false, diff: compactDiff(diff) };
+          return { project: this.publicProject(this.getProject(p.id)), from, clean: false, diff: compactDiff(diff), renumbered };
         }
         case 'attachWorld': {
           segment(body.worldName, '世界书名');

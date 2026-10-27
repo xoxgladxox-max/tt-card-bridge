@@ -72,3 +72,63 @@ export function assertUniqueEntryUids(scan, lib, fp) {
     seen.set(key, n.relPath);
   }
 }
+
+// 改连：本地条目记的是旧卡的编号，删卡重导后酒馆重新编了号。按标题和正文把两边配成对，算出每个本地文件该用的编号。
+//   标题和正文都相同：同一条，用酒馆的编号
+//   编号和标题都相同、正文不同：同一条，正文差异交给后面的选边
+//   只有标题相同：交作者选（choices[relPath] === 'pair' 才配对，否则当两条）
+//   配不上的本地条目：编号被酒馆其他条目占用时换一个空编号，否则不动
+// locals: [{ relPath, title, body, uid }]；remotes: [{ uid, title, body }]（正文已统一换行和首尾空白）
+export function matchRebindEntries(locals, remotes, choices = {}) {
+  const used = new Set(), pair = new Map(), ambiguous = [];
+  const take = (l, test) => {
+    const r = remotes.find(r => !used.has(r) && test(r));
+    if (r) { used.add(r); pair.set(l, r); }
+    return r;
+  };
+  for (const l of locals) take(l, r => r.title === l.title && r.body === l.body && String(r.uid) === String(l.uid));
+  for (const l of locals) if (!pair.has(l)) take(l, r => r.title === l.title && r.body === l.body);
+  for (const l of locals) if (!pair.has(l)) take(l, r => r.title === l.title && String(r.uid) === String(l.uid));
+  for (const l of locals) {
+    if (pair.has(l)) continue;
+    const r = remotes.find(r => !used.has(r) && r.title === l.title);
+    if (!r) continue;
+    ambiguous.push({ relPath: l.relPath, title: l.title, localUid: l.uid, remoteUid: r.uid });
+    if (choices[l.relPath] === 'pair') { used.add(r); pair.set(l, r); }
+  }
+  const remoteUids = new Set(remotes.map(r => String(r.uid))), finals = new Set();
+  let next = Math.max(0, ...remotes.map(r => Number(r.uid)).filter(Number.isFinite)) + 1;
+  const changes = [], localOnly = [];
+  for (const l of locals) {
+    const r = pair.get(l);
+    let uid = r ? r.uid : l.uid, reason = 'paired';
+    if (!r) {
+      localOnly.push({ relPath: l.relPath, title: l.title });
+      if (remoteUids.has(String(uid)) || finals.has(String(uid))) {
+        while (remoteUids.has(String(next)) || finals.has(String(next))) next++;
+        uid = next++; reason = 'reassigned';
+      }
+    }
+    finals.add(String(uid));
+    if (String(uid) !== String(l.uid)) changes.push({ relPath: l.relPath, title: l.title, from: l.uid, to: uid, reason });
+  }
+  const remoteOnly = remotes.filter(r => !used.has(r)).map(r => ({ uid: r.uid, title: r.title }));
+  return { pairedCount: pair.size, changes, ambiguous, localOnly, remoteOnly };
+}
+
+// 只改文件开头的 tavern.id（没有 id 时顺便补上），正文和其他设置不动；改完解析一遍核对
+export function setEntryUid(raw, { uid, id = null }, lib, YAML) {
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
+  const match = raw.match(/^(\uFEFF?---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))/);
+  let text;
+  if (!match) {
+    text = `---${eol}${YAML.stringify({ ...(id ? { id } : {}), tavern: { id: uid } }).trimEnd().replaceAll('\n', eol)}${eol}---${eol}${eol}<!-- body -->${eol}${raw.replace(/^\uFEFF/, '')}`;
+  } else {
+    const doc = YAML.parseDocument(lib.quoteBarePosition(match[2]));
+    if (doc.errors.length || !YAML.isMap(doc.contents)) fail('INVALID_PROJECT', '文件开头设置不是有效键值表，不能改编号');
+    if (id && !doc.has('id')) doc.set('id', id);
+    doc.setIn(['tavern', 'id'], uid);
+    text = match[1] + String(doc).trimEnd().replaceAll('\n', eol) + raw.slice(match[1].length + match[2].length);
+  }
+  return text;
+}

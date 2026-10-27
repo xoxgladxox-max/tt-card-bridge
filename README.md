@@ -43,8 +43,8 @@
 - **同步技能与Agent**：一键存档当前版本，将全部 `cf-*` 技能同步部署到 LimCode TEST、Claude Code、`~/.agents/skills` 与酒馆全局技能（宿主目录 `~/.claude`、`~/.agents` 不存在时跳过；只动 `cf-*` 和改名前的旧名目录，不碰第三方技能），并自动更新酒馆中制卡 Agent 配置的技能列表。
 
 ### 5. 本地新建世界书条目（自动补稳定 `id` 与 `uid`）
-- 在已接入工程的 `world_book/**/<条目>.md` 中编写 frontmatter 与 `<!-- card-forge:body -->` 正文，**可省略 `id` 字段**。
-- 同步时后台会自动分配不与远端或历史基线冲突的 `wb-<递增序号>`（及酒馆 `uid`），写回该 `.md` 文件并推送至酒馆世界书。
+- 在已接入工程的 `world_book/**/<条目>.md` 中编写 frontmatter 与 `<!-- body -->` 正文，**可省略 `id` 字段**。
+- 同步时后台会自动分配不与远端或历史基线冲突的 `world-<哈希>`（及酒馆 `uid`），写回该 `.md` 文件并推送至酒馆世界书。
 
 ### 6. 酒馆 Agent 读写工作区（MCP）
 后台在 `http://127.0.0.1:18789/tt-bridge/mcp` 提供 MCP 接口（须带连接令牌），让 TauriTavern 的 Agent 和 VS Code 读写同一个工作区目录。

@@ -4,6 +4,19 @@ import crypto from 'node:crypto';
 import { stable, canonicalJson } from '../extension/protocol.js';
 export { stable };
 
+// 目录复制统一走这里：当前 Windows 上的 Node 24 用 fs.cpSync 复制中文名目录时会把名字写成乱码（单测里实测到），
+// 有的目录还会直接崩溃。逐项复制，不跟随链接，目标已存在就报错，不覆盖
+export function copyTree(source, destination) {
+  const stat = fs.lstatSync(source);
+  if (stat.isSymbolicLink()) throw new BridgeError('INVALID_PATH', `复制时遇到链接，没有复制：${source}`, 400);
+  if (stat.isDirectory()) {
+    fs.mkdirSync(destination, { recursive: true });
+    for (const name of fs.readdirSync(source)) copyTree(path.join(source, name), path.join(destination, name));
+  } else if (stat.isFile()) {
+    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+  } else throw new BridgeError('INVALID_PATH', `复制时遇到特殊文件，没有复制：${source}`, 400);
+}
+
 export class BridgeError extends Error {
   constructor(code, message, status = 409, details) { super(message); this.code = code; this.status = status; this.details = details; }
 }

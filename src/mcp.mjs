@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { contained, digest, fail, atomicJson, readJson } from './safety.mjs';
+import { contained, digest, fail, atomicJson, readJson, copyTree } from './safety.mjs';
 import { BACKUPS_DIR } from './projects.mjs';
 
 export const MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
@@ -95,7 +95,7 @@ export function createMcpTools(service) {
     const isDir = fs.statSync(src).isDirectory();
     const dst = path.join(dir, 'content');
     if (mode === 'move') fs.renameSync(src, dst);
-    else if (isDir) fs.cpSync(src, dst, { recursive: true });
+    else if (isDir) copyTree(src, dst);
     else fs.copyFileSync(src, dst);
     atomicJson(path.join(dir, 'meta.json'), { id, path: rel, op, isDir, hash: isDir ? null : fileHash(dst), at: new Date().toISOString() });
     return id;
@@ -328,7 +328,7 @@ export function createMcpTools(service) {
           replacedBackupId = backupPath(rel, 'restore_backup');
         }
         fs.mkdirSync(path.dirname(target), { recursive: true });
-        if (meta.isDir) fs.cpSync(src, target, { recursive: true }); else fs.copyFileSync(src, target);
+        if (meta.isDir) copyTree(src, target); else fs.copyFileSync(src, target);
         return { path: rel, restoredFrom: backupId, replacedBackupId, ...(meta.isDir ? {} : { hash: fileHash(target) }) };
       });
     },

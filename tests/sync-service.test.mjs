@@ -522,9 +522,10 @@ test('pruneBackups keeps only the newest N stamped backups and never touches oth
   const ctx = { backupRoot: () => root };
   assert.deepEqual(FileSyncAdapter.prototype.pruneBackups.call(ctx, {}, '', 0), []);
   assert.equal(fs.readdirSync(root).length, 5);
+  // 「接入前的工程」整目录备份和作者自己放的东西不计数、不删除
   const removed = FileSyncAdapter.prototype.pruneBackups.call(ctx, {}, '', 2);
-  assert.deepEqual(removed.sort(), [names[0], names[1]]);
-  assert.deepEqual(fs.readdirSync(root).sort(), [names[2], names[3], names[4]].sort());
+  assert.deepEqual(removed, [names[0]]);
+  assert.deepEqual(fs.readdirSync(root).sort(), [names[1], names[2], names[3], names[4]].sort());
 });
 test('deleted card: status says cardMissing, automatic sync records once and writes nothing, manual sync explains', async t => {
   const adapter = new MemoryAdapter();
@@ -564,4 +565,45 @@ test('rebind moves the project to the re-imported card; clean starts syncing, di
   assert.ok(diff.diff.changedSlots.length > 0);
   assert.equal(adapter.pushes, pushesBefore);
   assert.equal(adapter.writes, writesBefore);
+});
+
+test('overwrite attach keeps non-card files (records, candidates, notes, research) and lists them first', async t => {
+  const f = await fileFixture(t, true);
+  const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
+  const dir = path.join(f.cardsRoot, p.id);
+  for (const [rel, text] of [['记录/决策.md', 'd'], ['候选/entry/旧节点.md', 'c'], ['note/n.md', 'n'], ['调研.md', 'r']]) { fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true }); fs.writeFileSync(path.join(dir, rel), text); }
+  await assert.rejects(f.service.control({ action: 'attach', cardFile: 'A.png' }), e => e.code === 'ATTACH_CONFLICT' && e.details.keepGroups.some(g => g.path === '记录/') && e.details.keepGroups.some(g => g.path === '调研.md') && e.details.replaceCount > 0);
+  await f.service.control({ action: 'attach', cardFile: 'A.png', overwrite: true });
+  assert.equal(fs.readFileSync(path.join(dir, '记录', '决策.md'), 'utf8'), 'd');
+  assert.equal(fs.readFileSync(path.join(dir, '候选', 'entry', '旧节点.md'), 'utf8'), 'c');
+  assert.equal(fs.readFileSync(path.join(dir, 'note', 'n.md'), 'utf8'), 'n');
+  assert.equal(fs.readFileSync(path.join(dir, '调研.md'), 'utf8'), 'r');
+  const backups = fs.readdirSync(f.adapter.backupRoot(f.service.getProject(p.id)));
+  assert.ok(backups.some(n => n.endsWith('-接入前的工程')), JSON.stringify(backups));
+  assert.equal((await f.service.control({ action: 'diff', projectId: p.id })).clean, true);
+});
+test('rebind after delete-and-reimport renumbers matched entries by title and body, after confirmation', async t => {
+  const f = await fileFixture(t, true);
+  const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
+  // 玩家删卡重导：新卡文件名 B.png，酒馆把条目重新编号成 7，原来的 42 被另一条新条目占用
+  fs.copyFileSync(f.pngPath, path.join(f.userDir, 'characters', 'B.png'));
+  fs.unlinkSync(f.pngPath);
+  const entry = (uid, comment, content) => ({ uid, key: ['key'], keysecondary: [], content, comment, constant: false, disable: false, order: 100, position: 0, depth: 4 });
+  atomicJson(path.join(f.userDir, 'worlds', 'Book.json'), { entries: { 7: entry(7, 'entry', 'external body'), 42: entry(42, 'other', 'new in tavern') } });
+  const first = await f.service.control({ action: 'rebind', projectId: p.id, cardFile: 'B.png' });
+  assert.equal(first.needsConfirm, true);
+  assert.deepEqual(first.plan.changes.map(c => [String(c.from), c.to]), [['42', 7]]);
+  assert.deepEqual(first.plan.remoteOnly.map(r => r.title), ['other']);
+  const dir = path.join(f.cardsRoot, p.id), binding = () => JSON.parse(fs.readFileSync(path.join(dir, '.card-forge', 'bridge.json'), 'utf8'));
+  assert.equal(binding().cardFile, 'A.png');
+  const done = await f.service.control({ action: 'rebind', projectId: p.id, cardFile: 'B.png', confirm: true, planId: first.plan.planId });
+  assert.equal(done.renumbered.changed.length, 1);
+  assert.ok(done.renumbered.backupId.endsWith('-改连前的条目'));
+  assert.equal(binding().cardFile, 'B.png');
+  const file = fs.readdirSync(path.join(dir, 'world_book')).find(n => n.endsWith('.md'));
+  const raw = fs.readFileSync(path.join(dir, 'world_book', file), 'utf8');
+  assert.match(raw, /tavern:[\s\S]*id: 7/);
+  assert.ok(raw.includes('external body'));
+  const diff = await f.service.control({ action: 'diff', projectId: p.id });
+  assert.ok(!diff.slots.some(s => s.key === 'entry:7' && s.node !== s.tavern));
 });

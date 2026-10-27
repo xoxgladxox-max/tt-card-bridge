@@ -3,9 +3,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { readSlotsFromNodes, readSlotsFromCard, readSlotsFromTavern, attachNodeSettings, loadSyncState, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extrasLib } from './slots.mjs';
-import { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable } from './safety.mjs';
+import { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } from './safety.mjs';
 import { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } from './projects.mjs';
-import { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline } from './world-entry-ids.mjs';
+import { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline, matchRebindEntries, setEntryUid } from './world-entry-ids.mjs';
 import { publishCardJob, getJobResult } from './bridge.mjs';
 import { inspectSkillsAndAgents, deploySkillsAndAgents } from './skills.mjs';
 
@@ -95,8 +95,10 @@ export class FileSyncAdapter {
     if (!validLocation) fail('INVALID_PROJECT', '工程必须位于工作区目录下', 400);
     const records = [...discoverProjects(this.cardsRoot)];
     const own = records.find(p => sameProjectPath(p.dir, project.dir));
+    // 覆盖拆解时的临时目录：它将替换的那个同名工程不算「其他工程」
+    const replacing = project.staging && project.finalDir ? project.finalDir : null;
     if (own?.cardFile && project.cardFile && own.cardFile !== project.cardFile) fail('BINDING_CONFLICT', 'CLI目标与工程既有绑定不同');
-    if (project.cardFile && records.some(p => !sameProjectPath(p.dir, project.dir) && targetOccupied(p, project.cardFile))) fail('TARGET_OCCUPIED', '同一目标仍由其他工程占用，包含其未决或待恢复操作');
+    if (project.cardFile && records.some(p => !sameProjectPath(p.dir, project.dir) && !(replacing && sameProjectPath(p.dir, replacing)) && targetOccupied(p, project.cardFile))) fail('TARGET_OCCUPIED', '同一目标仍由其他工程占用，包含其未决或待恢复操作');
   }
   async assertAvailable(project, { restoring = false, lifecycleId } = {}) {
     this.assertTargetAvailable(project);
@@ -414,13 +416,13 @@ export class FileSyncAdapter {
     this.pruneBackups(project, backupDir, backupKeep);
     return id;
   }
-  // 只保留最近 keep 份。只动工具自己生成的、以时间戳开头的备份文件夹；作者自己放进去的东西不碰。keep 为 0 或没给时全部保留
+  // 只保留最近 keep 份。只动同步前自动生成的快照（时间戳-8位编号）；「接入前的工程」整目录备份和作者自己放的东西不计数、不删。keep 为 0 或没给时全部保留
   pruneBackups(project, backupDir = '', keep) {
     if (!Number.isInteger(keep) || keep <= 0) return [];
     const root = this.backupRoot(project, backupDir);
     if (!fs.existsSync(root)) return [];
     const stamped = fs.readdirSync(root, { withFileTypes: true })
-      .filter(e => e.isDirectory() && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z/.test(e.name))
+      .filter(e => e.isDirectory() && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{8}$/.test(e.name))
       .map(e => e.name).sort().reverse();
     const removed = stamped.slice(keep);
     for (const name of removed) fs.rmSync(path.join(root, name), { recursive: true, force: true });
@@ -601,9 +603,86 @@ export class FileSyncAdapter {
     if (configured && configured !== worldName) fail('BINDING_CONFLICT', '工程世界书名与CLI目标不同');
     if (!fs.existsSync(worldFilePath(worldName, this.userDir))) fail('WORLD_NOT_FOUND', '世界书不存在；不能自动覆盖其他目标');
   }
+  // 覆盖拆解时怎么处理旧工程：卡内容文件（与同步、装卡同一口径的 nodeFiles）按酒馆当前内容重新生成，
+  // 其余文件（记录/、候选/、待归位/、note/、调研.md、封面等）原样搬进新工程。.card-forge/ 是同步记录，重新建立
+  overwritePlan(dir) {
+    const replace = new Set(nodeFiles(dir)), keep = [];
+    const walk = rel => {
+      for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+        const next = rel ? `${rel}/${e.name}` : e.name;
+        if (!rel && e.name === '.card-forge') continue;
+        if (e.isDirectory() && !e.isSymbolicLink()) walk(next);
+        else if (!replace.has(next)) keep.push(next);
+      }
+    };
+    walk('');
+    const groups = new Map();
+    for (const rel of keep) { const top = rel.includes('/') ? `${rel.split('/')[0]}/` : rel; groups.set(top, (groups.get(top) ?? 0) + 1); }
+    return { replace: [...replace].sort(), keep: keep.sort(), keepGroups: [...groups].map(([path, files]) => ({ path, files })).sort((a, b) => a.path.localeCompare(b.path)) };
+  }
+  // 改连前的条目配对：只读。列出哪些本地条目要换成新卡的编号、哪些要作者选、哪些两边对不上
+  async planRebind(project, cardFile, choices = {}) {
+    segment(cardFile, '卡文件名');
+    const { nodes: lib, fp, build } = await this.libraries();
+    const local = this.localSnapshot(project);
+    let scan;
+    try { scan = await lib.scanCard(project.dir); }
+    catch (e) { fail('INVALID_FORMAT', `「${project.id}」有文件格式不对，不能改连：${e.message}`, 422); }
+    const bad = scan.nodes.flatMap(n => n.problems.filter(p => ['P0', 'P1', 'P2'].includes(p.rule)).map(p => `${n.relPath.split(path.sep).join('/')}（${p.message}）`));
+    if (bad.length) fail('INVALID_FORMAT', `「${project.id}」有 ${bad.length} 处格式不对，不能改连：${bad.slice(0, 5).join('；')}${bad.length > 5 ? ' 等' : ''}`, 422);
+    assertUniqueEntryUids(scan, lib, fp);
+    const built = build.assemble(scan);
+    const slots = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan).slots;
+    const norm = s => String(s ?? '').replaceAll('\r\n', '\n').trim();
+    const locals = Object.entries(slots).filter(([k]) => k.startsWith('entry:'))
+      .map(([k, s]) => ({ relPath: s.relPath.split(path.sep).join('/'), title: String(s.builtEntry?.comment ?? ''), body: s.value, uid: k.slice(6) }));
+    const tavern = readSlotsFromTavern(cardFile, { userDir: this.userDir });
+    const remotes = tavern.worldRaw !== null
+      ? Object.values(JSON.parse(tavern.worldRaw).entries ?? {}).map(e => ({ uid: e.uid, title: String(e.comment ?? ''), body: norm(e.content) }))
+      : ((tavern.card.data ?? tavern.card).character_book?.entries ?? []).map(e => ({ uid: e.id, title: String(e.comment ?? ''), body: norm(e.content) }));
+    const match = matchRebindEntries(locals, remotes, choices);
+    const planId = hashObject({ localHash: local.localHash, card: digest(tavern.png), world: tavern.worldRaw, choices, changes: match.changes }).slice(0, 16);
+    return { cardFile, localCount: locals.length, remoteCount: remotes.length, ...match, planId };
+  }
+  // 按配对结果改本地文件的 tavern.id：改前把要改的文件备份到「<时间>-改连前的条目」（不计入保留份数）；
+  // 没有 id 的条目顺便补一个固定 id，否则同步时会把新编号当成「被占用」
+  async applyRebind(project, plan, { skipBackup = false, acceptDataLossRisk = false, backupDir = '' } = {}) {
+    if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接改编号前，必须确认自行承担数据丢失责任', 400);
+    const { nodes: lib, YAML } = await this.libraries();
+    const scan = await lib.scanCard(project.dir);
+    const byRel = new Map(scan.nodes.map(n => [n.relPath.split(path.sep).join('/'), n]));
+    const noId = n => n.idImplied === true || n.id === null || n.id === undefined || n.id === '';
+    const ids = new Set(scan.nodes.filter(n => !noId(n)).map(n => String(n.id)));
+    const writes = plan.changes.map(c => {
+      const n = byRel.get(c.relPath);
+      if (!n) fail('STALE_LOCAL', `改连期间文件不见了：${c.relPath}`);
+      const file = contained(project.dir, c.relPath), raw = fs.readFileSync(file, 'utf8');
+      let id = null;
+      if (noId(n)) {
+        const seed = hashObject({ relPath: c.relPath, raw }).slice(0, 24);
+        for (let attempt = 0; ; attempt++) { id = `world-${seed}${attempt ? `-${attempt}` : ''}`; if (!ids.has(id)) break; }
+        ids.add(id);
+      }
+      const uid = /^\d+$/.test(String(c.to)) ? Number(c.to) : c.to;
+      const text = setEntryUid(raw, { uid, id }, lib, YAML), parsed = lib.parseNodeFile(text, n.relPath);
+      if (parsed.problems.length || parsed.body !== n.body || String(parsed.frontmatter?.tavern?.id) !== String(c.to)) fail('INVALID_PROJECT', `改编号会动到 ${c.relPath} 的其他内容；没有写入`);
+      return { ...c, file, raw, text };
+    });
+    let backupId = null;
+    if (!skipBackup && writes.length) {
+      backupId = `${new Date().toISOString().replace(/[:.]/g, '-')}-改连前的条目`;
+      const dir = path.join(this.backupRoot(project, backupDir), backupId);
+      for (const w of writes) { const dst = contained(dir, `工程/${w.relPath}`); fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.writeFileSync(dst, w.raw, 'utf8'); }
+    }
+    for (const w of writes) fs.writeFileSync(w.file, w.text, 'utf8');
+    return { changed: writes.map(({ relPath, title, from, to, reason }) => ({ relPath, title, from, to, reason })), backupId };
+  }
   async attach(project, { overwrite = false, skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep, keep } = {}) {
     await this.assertAvailable(project);
-    if (fs.existsSync(project.dir) && !overwrite) fail('ATTACH_CONFLICT', '同名工程目录已存在；拒绝覆盖或自动接入');
+    if (fs.existsSync(project.dir) && !overwrite) {
+      const plan = this.overwritePlan(project.dir);
+      fail('ATTACH_CONFLICT', '同名工程目录已存在；拒绝覆盖或自动接入', 409, { replaceCount: plan.replace.length, keepGroups: plan.keepGroups });
+    }
     if (overwrite && skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖同名工程前，必须勾选确认自行承担数据丢失责任', 400);
     const worldOnly = project.cardFile.startsWith('world:');
     if (worldOnly && !fs.existsSync(worldFilePath(project.cardFile.slice(6), this.userDir))) fail('WORLD_NOT_FOUND', '世界书不存在；不能接入', 404);
@@ -630,7 +709,7 @@ export class FileSyncAdapter {
     try {
       const result = await unpack.unpackCmd(source, { out, ...(Array.isArray(keep) ? { keep } : {}) });
       if (!result.ok) fail('UNPACK_FAILED', result.report, 422);
-      const staged = { ...project, dir: out, staging: true };
+      const staged = { ...project, dir: out, staging: true, finalDir: overwrite ? project.dir : null };
       const snapshot = await this.snapshot(staged);
       const { compareSnapshot } = await import('./sync-engine.mjs');
       const diff = compareSnapshot(snapshot);
@@ -647,8 +726,14 @@ export class FileSyncAdapter {
           const stamp = new Date().toISOString().replace(/[:.]/g, '-');
           const backupTarget = path.join(this.backupRoot(project, backupDir), `${stamp}-接入前的工程`);
           fs.mkdirSync(path.dirname(backupTarget), { recursive: true });
-          fs.cpSync(project.dir, backupTarget, { recursive: true });
-          this.pruneBackups(project, backupDir, backupKeep);
+          copyTree(project.dir, backupTarget);
+        }
+        // 不进卡的文件搬进新工程，再删旧目录。拆卡只写卡内容文件，两边不会撞名；撞了就停下，不覆盖
+        for (const rel of this.overwritePlan(project.dir).keep) {
+          const dst = contained(out, rel);
+          if (fs.existsSync(dst)) fail('ATTACH_CONFLICT', `保留旧文件时与新拆出的文件同名：${rel}；没有覆盖`);
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          copyTree(path.join(project.dir, rel), dst);
         }
         fs.rmSync(project.dir, { recursive: true, force: true });
       }

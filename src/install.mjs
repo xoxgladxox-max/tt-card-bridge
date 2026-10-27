@@ -7,6 +7,7 @@ import path from 'node:path';
 import { execSync, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tavernDataRoot, tavernUserDir, isNativeSillyTavern } from './paths.mjs';
+import { copyTree } from './safety.mjs';
 import { connection, BRIDGE_BASE, BRIDGE_PORT } from './connection.mjs';
 import { installAgentSetup, removeAgentSetup, manualSteps } from './tt-agent-setup.mjs';
 
@@ -19,18 +20,7 @@ const EXT_DST = NATIVE
   : path.join(tavernDataRoot(), 'extensions', 'third-party', 'tt-card-bridge');
 const OLD_SCRIPT = '卡片同步刷新';
 
-// fs.cpSync crashes natively for this source directory on the current Windows
-// Node 24 runtime. Use the same checked traversal for install and backup.
-function copyTree(source, destination) {
-  const stat = fs.lstatSync(source);
-  if (stat.isSymbolicLink()) throw new Error(`扩展复制不接受符号链接：${source}`);
-  if (stat.isDirectory()) {
-    fs.mkdirSync(destination, { recursive: true });
-    for (const name of fs.readdirSync(source)) copyTree(path.join(source, name), path.join(destination, name));
-  } else if (stat.isFile()) {
-    fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
-  } else throw new Error(`扩展复制不接受特殊文件：${source}`);
-}
+// 目录复制与备份、MCP 共用 safety.mjs 的 copyTree（fs.cpSync 在当前 Windows Node 24 上不可靠）
 
 function backupExtension() {
   if (!fs.existsSync(EXT_DST)) return null;
