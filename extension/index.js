@@ -59,43 +59,6 @@ async function syncActiveCardRuntime(cid) {
 }
 
 
-// 建卡任务：cards 里新建了卡文件夹，酒馆里还没有这张卡。用酒馆自己的建卡接口，卡文件名取文件夹名；内容随后由 push 写入
-async function runCreateJob(job) {
-  if (job.expectedAbsent !== true) throw new Error('建卡任务未确认目标不存在，已拒绝创建。');
-  await ctx().getCharacters();
-  const st = ctx();
-  const target = `${job.fileName}.png`;
-  if (st.characters.some(card => card.avatar.toLowerCase() === target.toLowerCase())) throw new Error('同名角色卡已经存在，未覆盖或接入。');
-  if (typeof job.pngBase64 === 'string' && job.pngBase64) {
-    // 带封面：用酒馆的导入接口，文件名用 preserved_name 固定（与备份恢复同一条路）
-    const bytes = Uint8Array.from(atob(job.pngBase64), c => c.charCodeAt(0));
-    const form = new FormData();
-    form.append('avatar', new Blob([bytes], { type: 'image/png' }), target);
-    form.append('file_type', 'png');
-    form.append('preserved_name', target);
-    const headers = new Headers(st.getRequestHeaders());
-    headers.delete('Content-Type');
-    const r = await fetch('/api/characters/import', { method: 'POST', headers, body: form });
-    if (!r.ok) throw new Error(`带封面建卡失败：HTTP ${r.status} ${(await r.text()).slice(0, 300)}`);
-    const imported = await r.json();
-    const avatar = imported.character?.avatar ?? `${imported.file_name}.png`;
-    await refreshCards([]);
-    return { id: job.id, avatar };
-  }
-  const body = {
-    ch_name: job.name, file_name: job.fileName,
-    description: '', personality: '', scenario: '', first_mes: '', mes_example: '', creator_notes: '',
-    system_prompt: '', post_history_instructions: '', creator: '', character_version: '', tags: [],
-    talkativeness: '0.5', world: '', depth_prompt_prompt: '', depth_prompt_depth: '4', depth_prompt_role: 'system',
-    fav: 'false', alternate_greetings: [], extensions: '{}',
-  };
-  const r = await fetch('/api/characters/create', { method: 'POST', headers: st.getRequestHeaders(), body: JSON.stringify(body) });
-  if (!r.ok) throw new Error(`建卡失败：HTTP ${r.status} ${(await r.text()).slice(0, 300)}`);
-  const avatar = (await r.text()).trim().replace(/^"|"$/g, '');
-  await refreshCards([]);
-  return { id: job.id, avatar };
-}
-
 // 改名任务：cards 里的卡文件夹改了名。走酒馆自带的 /rename-char 命令（内部就是前端的 renameCharacter），
 // 标签、额外世界书、作者注释、群聊成员、聊天记录里的角色名都由它一起改。它只改当前打开的卡，所以先打开这张卡，改完再切回原来的卡。
 // 不直接 import 酒馆的 script.js：地址和页面加载时不一致就会把主程序再跑一遍。
@@ -216,7 +179,6 @@ const consumer = createJobConsumer({ client, execute: async (kind, job) => {
     return runSkillJob(job);
   }
   if (job.op === 'restore') return mutations.restore(job);
-  if (job.op === 'create') return runCreateJob(job);
   if (job.op === 'rename') return runRenameJob(job);
   if (job.op) throw new Error(`不支持的卡片任务：${job.op}`);
   return job.worldName && !job.card ? mutations.runWorld(job) : mutations.runCard(job);

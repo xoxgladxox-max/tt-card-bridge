@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { contained, segment, readJson } from './safety.mjs';
 
-export const occupiesTarget = record => record.attached || !!record.pendingOperation || record.restoreRequired || !!record.binding?.initializing;
+export const occupiesTarget = record => record.attached || !!record.pendingOperation || record.restoreRequired;
 export const reservedTargets = record => occupiesTarget(record) ? [...new Set([record.cardFile, record.pendingOperation?.targetCardFile].filter(Boolean).map(x => x.toLowerCase()))] : [];
 export const targetOccupied = (record, target) => reservedTargets(record).includes(target.toLowerCase());
 // 工作区布局：cards/<卡名>/ 一张卡一个文件夹；cards/backups/ 放备份，不是工程

@@ -142,11 +142,6 @@ test('new card initialization refuses author-specified existing world before cre
   await f.service.control({ action: 'resume' }); await f.service.control({ action: 'followCard', cardFile: 'B.png' }); const before = files(f.root);
   await f.service.batch('sync', undefined, true); const result = await f.service.batch('sync', undefined, true);
   assert.deepEqual(result.results, []); assert.equal(f.calls.length, 0); assert.deepEqual(files(f.root), before);
-  // Even if another caller has already created a blank card, the common engine denies this authorization.
-  fs.writeFileSync(path.join(f.userDir, 'characters', 'B.png'), embedChara(image, blank('B')));
-  const project = { dir, cardFile: 'B.png' }, snapshot = await f.adapter.snapshot(project);
-  await assert.rejects(new SyncEngine(f.adapter).run(project, { initializeExpected: snapshot.expected }), e => e.code === 'WORLD_TARGET_CONFLICT');
-  assert.equal(f.calls.length, 0); assert.match(fs.readFileSync(worldFile, 'utf8'), /must survive/);
 });
 test('lifecycle pending status cannot be reported clean by read-only check', async t => {
   const f = await fixture(t), marker = path.join(f.project.dir, '.card-forge', 'bridge.json');
@@ -272,24 +267,17 @@ test('custom backupDir writes external backup copy, and skipBackup requires expl
   assert.equal(followUnattached.activeCardFile, 'Unattached.png');
   assert.deepEqual(files(f.project.dir), aBefore); assert.deepEqual(files(path.join(f.cardsRoot, 'B')), bBefore);
 
-  // importFromWorkspace：新格式散文件（没有开头设置）直接按文件位置装配并导入酒馆；调研.md 不进卡
-  const looseDir = path.join(f.cardsRoot, 'LooseCard');
-  fs.mkdirSync(path.join(looseDir, 'message'), { recursive: true });
-  fs.mkdirSync(path.join(looseDir, 'world_book'), { recursive: true });
-  fs.writeFileSync(path.join(looseDir, 'description.md'), '这是散乱角色描述正文\n', 'utf8');
-  fs.writeFileSync(path.join(looseDir, 'message', '0.md'), '这是散乱开场白正文\n', 'utf8');
-  fs.writeFileSync(path.join(looseDir, 'world_book', '基地设定.md'), '这是散乱世界书条目正文\n', 'utf8');
-  fs.writeFileSync(path.join(looseDir, '调研.md'), '这是不该塞进卡里的调研笔记\n', 'utf8');
-  const imported = await f.service.control({ action: 'importFromWorkspace', projectId: 'LooseCard' });
-  assert.equal(imported.project.attached, true);
-  assert.equal(imported.project.status, 'clean');
-  assert.equal(fs.readFileSync(path.join(looseDir, '调研.md'), 'utf8'), '这是不该塞进卡里的调研笔记\n');
-  assert.equal(fs.readFileSync(path.join(looseDir, 'description.md'), 'utf8'), '这是散乱角色描述正文\n');
-  const createdCard = readCardPng(path.join(f.userDir, 'characters', 'LooseCard.png'));
+  // 导入酒馆（buildCard）：只按传上来的文件合成一张卡交回面板，不建卡、不建绑定、不碰工作区；调研.md 不进卡
+  const beforeImport = files(f.root), callsBefore = f.calls.length;
+  const built = await f.service.control({ action: 'buildCard', files: { name: 'LooseCard', paths: ['description.md', 'message/0.md', 'world_book/基地设定.md', '调研.md', 'character.png'], files: {
+    'description.md': '这是散乱角色描述正文\n', 'message/0.md': '这是散乱开场白正文\n', 'world_book/基地设定.md': '这是散乱世界书条目正文\n', '调研.md': '这是不该塞进卡里的调研笔记\n', 'character.png': image.toString('base64') } } });
+  const createdCard = readCardPng(Buffer.from(built.pngBase64, 'base64'));
   assert.equal(createdCard.data.description, '这是散乱角色描述正文');
   assert.equal(createdCard.data.first_mes, '这是散乱开场白正文');
   assert.equal(createdCard.data.character_book.entries[0].content, '这是散乱世界书条目正文');
   assert.ok(!JSON.stringify(createdCard).includes('调研笔记'));
+  assert.deepEqual(files(f.root), beforeImport);
+  assert.equal(f.calls.length, callsBefore);
 
   // setCardsRoot 拒绝指向单张卡目录（含旧版 world/character 目录或 card.md），且旧版节点目录不会自动写空 card.md
   const legacyCardDir = path.join(f.cardsRoot, 'LegacySample');
@@ -298,7 +286,7 @@ test('custom backupDir writes external backup copy, and skipBackup requires expl
   fs.writeFileSync(path.join(legacyCardDir, 'world', '示例世界', 'index.md'), '---\nid: w1\ntype: world\n---\n<!-- body -->\nworld\n');
   fs.writeFileSync(path.join(legacyCardDir, 'character', '示例角色', 'index.md'), '---\nid: c1\ntype: character\n---\n<!-- body -->\nchar\n');
   await assert.rejects(f.service.control({ action: 'setCardsRoot', cardsRoot: legacyCardDir }), e => e.code === 'INVALID_CARDS_ROOT');
-  await assert.rejects(f.service.control({ action: 'importFromWorkspace', projectId: 'LegacySample' }), e => e.code === 'LEGACY_PROJECT');
+  await assert.rejects(f.service.control({ action: 'buildCard', files: { name: 'LegacySample', paths: ['world/示例世界/index.md'], files: { 'world/示例世界/index.md': 'x', 'character.png': image.toString('base64') } } }), e => e.code === 'LEGACY_PROJECT');
   assert.equal(fs.existsSync(path.join(legacyCardDir, 'card.md')), false);
 });
 

@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { readSlotsFromNodes, readSlotsFromCard, readSlotsFromTavern, attachNodeSettings, loadSyncState, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extrasLib } from './slots.mjs';
@@ -118,7 +119,7 @@ export class FileSyncAdapter {
     await this.assertAvailable(project, { restoring: job.op === 'restore', lifecycleId: job.id });
     const local = this.localSnapshot(project);
     if (snapshot && snapshot.localHash !== local.localHash) fail('STALE_LOCAL', '提交前本地工程改变');
-    const operation = { jobId: job.id, cardFile: project.cardFile, targetCardFile: job.op === 'create' ? `${job.fileName}.png` : job.op === 'rename' ? `${job.newName}.png` : project.cardFile, kind: job.op ?? 'push', state: 'pending', startedAt: new Date().toISOString(), localHash: local.localHash, expected: job.expected ?? null,
+    const operation = { jobId: job.id, cardFile: project.cardFile, targetCardFile: job.op === 'rename' ? `${job.newName}.png` : project.cardFile, kind: job.op ?? 'push', state: 'pending', startedAt: new Date().toISOString(), localHash: local.localHash, expected: job.expected ?? null,
       plannedSlots: snapshot ? Object.fromEntries(Object.entries(snapshot.nodes.slots).map(([k, v]) => [k, slotHash(v.value)])) : null };
     const file = this.operationFile(project); fs.mkdirSync(path.dirname(file), { recursive: true });
     try { fs.writeFileSync(file, JSON.stringify(operation, null, 2) + '\n', { flag: 'wx' }); }
@@ -540,48 +541,41 @@ export class FileSyncAdapter {
     const eol = raw.includes('\r\n') ? '\r\n' : '\n';
     fs.writeFileSync(file, `---${eol}${String(doc).trimEnd().replaceAll('\n', eol)}${eol}---` + raw.slice(match[0].length), 'utf8');
   }
-  async prepareNew(project, { embedWorld = false, allowExistingWorld = false } = {}) {
-    const { YAML, nodes, build } = await this.libraries();
-    const root = contained(project.dir, 'card.md');
-    if (!fs.existsSync(root)) {
-      if (isLegacyNodeDirectory(project.dir)) {
-        fail('LEGACY_PROJECT', '检测到旧版 index.md 节点目录；请先运行 node card-forge-lab/src/cli.mjs migrate "<旧卡目录>" --out "<新标准卡目录>" 迁移为 card.md 新结构，不会自动写入空 card.md', 422);
+  // 「导入酒馆」：像酒馆「从文件导入角色」一样的独立操作。面板把作者选的文件夹里的卡文件传上来，
+  // 这里在临时目录用和导出相同的装卡命令合成一张 PNG 交回面板，由酒馆自己的导入接口建卡（重名加编号也由酒馆做）。
+  // 不读写工作区、不建绑定、不做同步，之后作者什么时候拆、什么时候连都和这次无关。
+  async buildCardFromFiles({ name, paths = [], files } = {}) {
+    segment(name, '文件夹名');
+    if (!files || typeof files !== 'object' || Array.isArray(files)) fail('INVALID_FILES', '没有收到文件', 400);
+    const all = new Set([...(Array.isArray(paths) ? paths : []), ...Object.keys(files)].map(p => String(p).replaceAll('\\', '/')));
+    if (!all.has('card.md') && [...all].some(p => p === 'index.md' || /^(world|character|greeting|output|style)\//.test(p))) {
+      fail('LEGACY_PROJECT', '这是旧版 index.md 节点目录；请先运行 node card-forge-lab/src/cli.mjs migrate "<旧卡目录>" --out "<新标准卡目录>" 迁移为 card.md 新结构', 422);
+    }
+    const cardFiles = Object.keys(files).map(p => p.replaceAll('\\', '/')).filter(p => p === 'card.md' || isCardFile(p));
+    if (!cardFiles.length) fail('INVALID_PROJECT', `「${name}」里没有卡工程文件（card.md、字段 .md、message\\、world_book\\）；请选择卡工程文件夹本身`, 422);
+    const { build } = await this.libraries();
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tt-import-'));
+    try {
+      const dir = path.join(tmp, 'card');
+      for (const [raw, value] of Object.entries(files)) {
+        const rel = raw.replaceAll('\\', '/');
+        if (rel !== 'card.md' && !isCardFile(rel)) continue;
+        if (typeof value !== 'string') fail('INVALID_FILES', `${rel} 不是文本`, 400);
+        const dst = contained(dir, rel);
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.writeFileSync(dst, value, 'utf8');
       }
-      // 只有散文件的新工程（如只写了 description.md、world_book/*.md）：补一个卡根，其他文件不动
-      fs.writeFileSync(root, `---\n${YAML.stringify({ id: 'card-root', type: 'card', name: project.name }).trimEnd()}\n---\n\n## 工序\n- 状态：草稿\n\n${BODY}\n`, 'utf8');
+      // 只有散文件的工程：在临时目录补一个卡根，作者的文件夹不动
+      if (!fs.existsSync(path.join(dir, 'card.md'))) fs.writeFileSync(path.join(dir, 'card.md'), `---\nid: card-root\ntype: card\nname: ${JSON.stringify(name)}\n---\n\n${BODY}\n`, 'utf8');
+      if (typeof files['character.png'] !== 'string' || !files['character.png']) fail('INVALID_FILES', '缺少封面图', 400);
+      const cover = path.join(tmp, 'cover.png');
+      fs.writeFileSync(cover, Buffer.from(files['character.png'], 'base64'));
+      const result = await build.buildCmd(dir, { png: cover });
+      if (!result.ok || !result.pngPath) fail('INVALID_PROJECT', result.report, 422);
+      return { name, fileName: path.basename(result.pngPath), pngBase64: fs.readFileSync(result.pngPath).toString('base64'), report: result.report };
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
-    const scan = await nodes.scanCard(project.dir), card = build.assemble(scan).card;
-    if (scan.nodes.find(n => n.type === 'card')?.frontmatter?.book_only) fail('WORLD_ONLY_PROJECT', '独立世界书工程不自动建卡');
-    const explicitWorld = card.data?.extensions?.world;
-    if (explicitWorld && !allowExistingWorld && fs.existsSync(worldFilePath(explicitWorld, this.userDir))) fail('WORLD_TARGET_CONFLICT', `工程指定的世界书「${explicitWorld}」已存在；没有新建卡或覆盖世界书`);
-    if (!embedWorld && nodes.bookNodesOf(scan).length && !card.data?.extensions?.world) {
-      const base = project.name; let name = base;
-      for (let i = 2; fs.existsSync(worldFilePath(name, this.userDir)); i++) name = `${base}（${i}）`;
-      await this.setRoot(project, [[['tavern', 'data', 'extensions', 'world'], name]]);
-    }
-    const report = (await this.libraries()).protocol.validateNodes(await nodes.scanCard(project.dir));
-    if (report.errors.length) fail('INVALID_PROJECT', (await this.libraries()).protocol.formatReport(report), 422);
-    return {
-      cardName: (card.data?.name || project.name).trim() || project.name,
-      explicitWorld: explicitWorld || null,
-    };
-  }
-  async create(project, jobId, { displayName } = {}) {
-    // 带封面建卡：工程里有 character.png 时，把它做成只含卡名的空白卡，由酒馆「导入」接口按指定文件名建卡；
-    // 正文和世界书仍由随后的推送写入。没有封面时退回酒馆的建卡接口（默认头像）。
-    const name = (displayName || project.name).trim() || project.name;
-    let pngBase64 = null;
-    const cover = path.join(project.dir, 'character.png');
-    if (fs.existsSync(cover)) {
-      const { png } = await this.libraries();
-      const blank = { name, description: '', personality: '', scenario: '', first_mes: '', mes_example: '', spec: 'chara_card_v2', spec_version: '2.0',
-        data: { name, description: '', personality: '', scenario: '', first_mes: '', mes_example: '', creator_notes: '', system_prompt: '', post_history_instructions: '',
-          alternate_greetings: [], tags: [], creator: '', character_version: '', extensions: {} } };
-      pngBase64 = png.embedChara(fs.readFileSync(cover), blank).toString('base64');
-    }
-    const result = await this.send(project, { id: jobId, op: 'create', name, fileName: project.name, expectedAbsent: true, ...(pngBase64 ? { pngBase64 } : {}) });
-    if (!result || result.fatal) fail('CREATE_FAILED', result?.fatal ?? '酒馆未确认新建', 502);
-    segment(result.avatar, '返回的卡文件名'); return result.avatar;
   }
   async rename(project, jobId) {
     const snapshot = await this.snapshot(project);

@@ -78,6 +78,8 @@ export function mountSettings({ client, getContext }) {
             <small data-role="status" role="status" class="flex1">正在读取后台状态…</small>
             ${icon('toggle', 'fa-power-off', '启动同步', '启动本机后台并开启自动同步；暂停不打断正在进行的写入')}
             ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取状态，并把当前打开的卡告诉后台')}
+            ${icon('import-workspace', 'fa-file-import', '导入酒馆', '选一个有 card.md 的卡工程文件夹，合成后像「从文件导入角色」一样在酒馆里新建一张卡；不连接、不同步工程')}
+            <input type="file" data-role="import-folder" webkitdirectory hidden>
           </div>
           <small class="ttcb-dim">后台 <code data-role="connection">—</code> · 工作区 <code data-role="cards-root">—</code></small>
           <small data-role="backup-off-note" class="ttcb-warning" hidden>已关闭覆盖前备份，覆盖后无法找回旧版本。</small>
@@ -101,7 +103,6 @@ export function mountSettings({ client, getContext }) {
             <summary>工作区</summary>
             <div class="flex-container alignitemscenter">
               <select data-role="projects" class="flex1" aria-label="工作区里的卡工程"></select>
-              ${icon('import-workspace', 'fa-file-import', '导入酒馆', '把所选卡工程合成后写进酒馆；新卡会新建，同名卡先问覆盖还是另建副本')}
               ${icon('backups', 'fa-clock-rotate-left', '备份', '查看所选工程的备份并预览恢复')}
             </div>
             <small data-role="project-status" class="ttcb-dim"></small>
@@ -258,7 +259,7 @@ export function mountSettings({ client, getContext }) {
         action('attach').disabled = busy || !state || !currentCard();
         action('attach-world').disabled = busy || !state || !find('worlds').value;
         const project = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
-        action('import-workspace').disabled = busy || !state || !project;
+        action('import-workspace').disabled = busy || !state;
         action('backups').disabled = busy || !project?.attached;
         const card = currentCard();
         action('rebind').disabled = busy || !state || !project || project.targetKind === 'world' || !card?.avatar || project.cardFile?.toLowerCase() === card.avatar.toLowerCase();
@@ -565,39 +566,50 @@ export function mountSettings({ client, getContext }) {
             if (state?.paused !== false) state = await client.control('resume');
             find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」，已开启实时双向同步。`));
         },
+        // 导入酒馆：和酒馆「从文件导入角色」一样，选文件夹 → 合成 → 用酒馆的导入接口新建一张卡（重名由酒馆加编号）。
+        // 每次都是独立操作：不看同步记录、不连接工程、不同步
         'import-workspace': async () => {
-            const p = assembleTarget();
-            if (!p) { importNote('工作区目录里没有可导入的卡工程，或下拉框没有选中。', true); return; }
-            importNote(`正在合成「${p.id}」并写入酒馆…`);
-            const send = extra => client.control('importFromWorkspace', { projectId: p.id, ...extra });
-            let res;
-            try {
-                try {
-                    res = await send({});
-                } catch (error) {
-                    if (error?.code !== 'ATTACH_CONFLICT') throw error;
-                    const over = await askConfirm(
-                        `${error.message}\n\n「覆盖并绑定同名卡」：直接更新酒馆里的同名卡/世界书并开启实时双向同步（按备份设置先备份，不会生成 1.png、2.png）。\n「另建新副本」：保留原卡不动，或者取消。`,
-                        '覆盖并绑定同名卡', '另建新副本 / 取消',
-                    );
-                    if (over) {
-                        const backupOpts = overwriteBackupOptions();
-                        importNote('正在覆盖并绑定同名卡…');
-                        res = await send({ overwrite: true, ...backupOpts });
-                    } else {
-                        const copy = await askConfirm(`是否将「${p.id}」另存为带编号的新副本（如 1.png、2.png），原有的卡和世界书都不动？`, '新建副本', '取消');
-                        if (!copy) { importNote('已取消，没有导入。'); return; }
-                        importNote('正在新建卡副本并写入内容…');
-                        res = await send({ createNewCopy: true });
-                    }
-                }
-            } catch (error) {
-                importNote(`导入失败：${errorText(error)}`, true);
-                throw error;
+            const picker = find('import-folder');
+            picker.value = '';
+            const picked = await new Promise(resolve => {
+                picker.addEventListener('change', () => resolve([...picker.files]), { once: true });
+                picker.click();
+            });
+            if (!picked.length) return;
+            const rel = file => (file.webkitRelativePath || file.name).replaceAll('\\', '/');
+            // 选到上一层时：只有一个子文件夹里有 card.md 就用它
+            let roots = picked.map(rel).filter(p => p.endsWith('/card.md')).map(p => p.slice(0, -'card.md'.length));
+            roots = roots.filter(r => !roots.some(o => o !== r && r.startsWith(o)));
+            const top = rel(picked[0]).split('/')[0] + '/';
+            const base = roots.includes(top) ? top : roots.length === 1 ? roots[0] : top;
+            if (!roots.includes(base) && roots.length > 1) throw new Error(`选的文件夹里有 ${roots.length} 个卡工程：${roots.map(r => r.slice(0, -1)).join('、')}。请直接选其中一个。`);
+            const name = base.slice(0, -1).split('/').pop();
+            const skip = new Set(['backups', 'dist', '记录', '候选', '待归位', 'note', 'handoff', 'node_modules']);
+            const inside = picked.filter(file => rel(file).startsWith(base)).map(file => ({ file, path: rel(file).slice(base.length) }))
+                .filter(({ path }) => !path.split('/').some((part, i, all) => part.startsWith('.') || (i < all.length - 1 && skip.has(part))));
+            const files = {};
+            for (const { file, path } of inside) {
+                if (/\.(md|json|html|js)$/i.test(path)) files[path] = await file.text();
             }
-            if (state?.paused !== false) state = await client.control('resume');
-            const made = res?.project?.cardFile ? `（酒馆里的卡文件：${res.project.cardFile}）` : '';
-            importNote(`已把「${p.id}」写入酒馆${made}，已开启实时双向同步。`);
+            const toBase64 = async blob => { const bytes = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
+            const cover = inside.find(({ path }) => path === 'character.png')?.file ?? await fetch('img/ai4.png').then(r => r.ok ? r.blob() : null);
+            if (!cover) throw new Error('卡工程里没有 character.png，也取不到酒馆默认头像。');
+            files['character.png'] = await toBase64(cover);
+            importNote(`正在合成「${name}」…`);
+            const built = await client.control('buildCard', { files: { name, paths: inside.map(x => x.path), files } });
+            const bytes = Uint8Array.from(atob(built.pngBase64), c => c.charCodeAt(0));
+            const ctx = getContext();
+            const form = new FormData();
+            form.append('avatar', new File([bytes], built.fileName, { type: 'image/png' }));
+            form.append('file_type', 'png');
+            if (ctx.name1) form.append('user_name', ctx.name1);
+            const headers = new Headers(ctx.getRequestHeaders());
+            headers.delete('Content-Type');
+            const response = await fetch('/api/characters/import', { method: 'POST', headers, body: form, cache: 'no-cache' });
+            const data = response.ok ? await response.json() : null;
+            if (!data || data.error || data.file_name === undefined) throw new Error(`酒馆导入失败：${response.status} ${data?.error ?? response.statusText}`);
+            await ctx.getCharacters?.();
+            importNote(`已导入为新卡「${data.file_name}」。卡里带的世界书，第一次打开这张卡时酒馆会问是否导入。`);
         },
         rebind: async () => {
             const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
