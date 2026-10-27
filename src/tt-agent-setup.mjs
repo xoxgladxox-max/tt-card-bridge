@@ -8,7 +8,7 @@ import path from 'node:path';
 export const BRIDGE_MCP_ID = 'c4a7e2b1-5d3f-4e8a-9b6c-7cb1d9e0a001';
 export const BRIDGE_PROFILE_ID = 'card-bridge';
 // 与 src/mcp.mjs 的 TOOLS 同名
-export const BRIDGE_TOOL_NAMES = ['status', 'list_files', 'read_file', 'search_files', 'file_info', 'write_file', 'apply_patch', 'create_dir', 'move', 'delete', 'disassemble_card', 'sync_now', 'validate_card', 'validate_worldbook', 'list_backups', 'restore_backup'];
+export const BRIDGE_TOOL_NAMES = ['status', 'list_files', 'read_file', 'search_files', 'file_info', 'write_file', 'apply_patch', 'create_dir', 'move', 'delete', 'disassemble_card', 'sync_now', 'validate_card', 'validate_worldbook'];
 
 const ttRoot = dataRoot => path.join(dataRoot, '_tauritavern');
 const registrationFile = dataRoot => path.join(ttRoot(dataRoot), 'mcp', 'registrations', `${BRIDGE_MCP_ID}.json`);
@@ -58,7 +58,7 @@ tools:
 - 改已有文件前先 read_file，记下返回的 hash；write_file、apply_patch、move、delete 时作为 baseHash 传回。
 - 返回 HASH_MISMATCH 说明文件在我读取之后被改过（作者在 VS Code 里改了，或后台同步写回了）。重新读取，按新内容再改，不要拿旧内容覆盖。
 - apply_patch 的 oldText 必须是读到的原文，不带行号。
-- 后台在每次覆盖、删除、移动前自动备份；delete 是移入备份。需要找回时用 list_backups 和 restore_backup。
+- 后台不备份，delete 是直接删除、不能找回。删除前先和作者确认。
 - 写操作一次一个，写完再读一遍核对。
 
 ## 和酒馆同步

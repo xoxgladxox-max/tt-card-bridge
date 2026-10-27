@@ -12,6 +12,7 @@ export function compareSnapshot(snapshot) {
     const unrecorded = snapshot.baselineReliable === true && !Object.hasOwn(baseline.slots, key) && !Object.hasOwn(baseline.pending ?? {}, key);
     const newEntry = !!n && !t && ((key.startsWith('entry:') && n.newEntryEligible === true) || key.startsWith('greeting:')) && unrecorded;
     const remoteNewEntry = !n && !!t && (key.startsWith('entry:') || key.startsWith('greeting:')) && unrecorded;
+    const deletedOn = (side, kept) => snapshot.baselineReliable === true && key.startsWith('entry:') && baseline.slots[key] === slotHash(kept.value);
     // 正则、脚本、变量：一边没有时按基线判断是哪边新增、哪边删除
     const extra = /^(regex|script):|^(vars|xbtasks)$/.test(key);
     const base0 = baseline?.slots?.[key];
@@ -21,8 +22,9 @@ export function compareSnapshot(snapshot) {
       else if (base0 === slotHash(has.value)) kind = n ? 'tavern' : 'project';
       else kind = 'conflict';
     }
-    else if (!n) kind = remoteNewEntry ? 'tavern' : 'added';
-    else if (!t) kind = newEntry ? 'project' : 'removed';
+    // 世界书条目一边删了：另一边还是上次同步的样子，就是那一边删的，照常同步删除
+    else if (!n) kind = remoteNewEntry ? 'tavern' : deletedOn('project', t) ? 'project' : 'added';
+    else if (!t) kind = newEntry ? 'project' : deletedOn('tavern', n) ? 'tavern' : 'removed';
     else if (n.value !== t.value) {
       const base = baseline?.slots?.[key];
       if (open.has(key)) kind = 'conflict';
@@ -55,33 +57,25 @@ export const nodeSignature = (snapshot, updates = []) => {
 export class SyncEngine {
   constructor(adapter) { this.adapter = adapter; }
   async inspect(project) { return compareSnapshot(await this.adapter.snapshot(project)); }
-  async run(project, { direction = 'both', previewRevision, choices, force = false, replaceRemote = false, skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep } = {}) {
-    if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖前，必须勾选确认自行承担数据丢失责任', 400);
+  // 不备份（作者决定 2026-10-27：酒馆里的旧卡就是历史版本）。replaceRemote：以本地为准整卡覆盖
+  async run(project, { direction = 'both', previewRevision, force = false, replaceRemote = false } = {}) {
     await this.adapter.assertAvailable?.(project);
     let before = await this.adapter.snapshot(project);
     if (previewRevision && before.revision !== previewRevision) fail('STALE_PREVIEW', '预览后内容已改变，请重新查看差异');
     let diff = compareSnapshot(before);
     if (diff.issues.length && !replaceRemote) fail('UNSUPPORTED_DIFFERENCE', '设置、绑定或槽位增删需要手动处理；未同步', 409, diff);
     const chosen = new Map();
-    if (choices !== undefined) {
-      if (!Array.isArray(choices)) fail('INVALID_CHOICE', 'choices 必须为数组', 400);
-      for (const c of choices) {
-        const slot = diff.slots.find(s => s.key === c.key);
-        if (!slot?.canResolve || slot.kind === 'equal' || chosen.has(c.key) || !['project', 'tavern', 'manual'].includes(c.source)) fail('INVALID_CHOICE', '只能为已有差异槽位提供一个决定', 400);
-        if (c.source === 'manual' && typeof c.text !== 'string') fail('INVALID_CHOICE', '手动正文必须是字符串', 400);
-        chosen.set(c.key, c.source === 'manual' ? c.text.replaceAll('\r\n', '\n').trim() : c.source === 'project' ? slot.node : slot.tavern);
-      }
-    }
     const conflicts = diff.slots.filter(s => s.kind === 'conflict' && !chosen.has(s.key));
     if (replaceRemote || (force && direction === 'push')) for (const s of conflicts) chosen.set(s.key, s.node);
-    else if (conflicts.length) fail('CONFLICT', '两边不同且没有安全基线；请选择正文，不会自动覆盖', 409, diff);
+    else if (conflicts.length) fail('CONFLICT', '两边都改了；请选「以本地为准覆盖」或「新建卡」', 409, diff);
     if (direction === 'push' && diff.slots.some(s => s.kind === 'tavern' && !chosen.has(s.key)) && !force && !replaceRemote) fail('TAVERN_CHANGED', '酒馆有尚未拉回的变化', 409, diff);
     if (diff.clean && !replaceRemote) { await this.adapter.saveBaseline(project, before, true); return { status: 'clean', changed: false }; }
     const updates = [];
     let needsPush = replaceRemote && diff.issues.length > 0;
     for (const s of diff.slots) {
       if (s.kind === 'equal') continue;
-      if (replaceRemote && s.kind === 'added') { needsPush = true; continue; }
+      // 以本地为准时，本地没有的槽位只推送（酒馆里的随之删掉），不写本地文件
+      if (replaceRemote && s.node === null) { needsPush = true; continue; }
       const value = chosen.has(s.key) ? chosen.get(s.key) : s.kind === 'tavern' && direction !== 'push' && !replaceRemote ? s.tavern : s.node;
       const pullSettings = s.settingsChanged === 'tavern' && direction !== 'push' && !replaceRemote;
       const pushSettings = s.settingsChanged === 'project' && direction !== 'pull';
@@ -94,16 +88,13 @@ export class SyncEngine {
       }
       if ((value !== s.tavern || pushSettings) && direction !== 'pull') needsPush = true;
     }
-    const backupId = skipBackup ? null : await this.adapter.backup(project, before, { backupDir, backupKeep });
-    // Recheck after backing up, before the first mutation. Transport also checks expected remote data.
-    if ((await this.adapter.snapshot(project)).revision !== before.revision) fail('STALE_PREVIEW', '备份时内容改变；没有写入');
     const plannedNodes = nodeSignature(before, updates);
     const plannedLocal = await this.adapter.writeBodies(project, before, updates);
-    const hasMetaUpdates = updates.some(u => u.remoteEntry || !before.nodes.slots[u.key]);
+    const hasMetaUpdates = updates.some(u => u.remoteEntry || u.value === null || !before.nodes.slots[u.key]);
     if (needsPush) {
       const prepared = await this.adapter.snapshot(project);
       if ((plannedLocal ? prepared.localHash !== plannedLocal : nodeSignature(prepared) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(prepared) !== plannedNodes)) fail('STALE_LOCAL', '决定后本地文件又改变；没有推送未经预览的内容');
-      if (JSON.stringify(prepared.expected) !== JSON.stringify(before.expected)) fail('STALE_REMOTE', '酒馆内容已改变；节点修改已备份，未推送');
+      if (JSON.stringify(prepared.expected) !== JSON.stringify(before.expected)) fail('STALE_REMOTE', '酒馆内容已改变；未推送');
       await this.adapter.push(project, prepared);
     }
     const after = await this.adapter.snapshot(project);
@@ -111,6 +102,6 @@ export class SyncEngine {
     diff = compareSnapshot(after);
     if (direction !== 'pull' && !diff.clean) fail('VERIFY_FAILED', '写入后查对仍不一致；未更新基线', 409, diff);
     await this.adapter.saveBaseline(project, after, diff.clean);
-    return { status: diff.clean ? 'clean' : 'pending', changed: updates.length > 0 || needsPush || !!before.idAssignments?.length, backupId, backupSkipped: Boolean(skipBackup), diff, assignedIds: (before.idAssignments ?? []).map(({ relPath, id, uid }) => ({ relPath, id, uid })) };
+    return { status: diff.clean ? 'clean' : 'pending', changed: updates.length > 0 || needsPush || !!before.idAssignments?.length, diff, assignedIds: (before.idAssignments ?? []).map(({ relPath, id, uid }) => ({ relPath, id, uid })) };
   }
 }

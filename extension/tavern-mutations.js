@@ -85,21 +85,22 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         const book = job.card.data?.character_book;
         if (name && book?.entries) {
             // Card and world are separate upstream operations. If this fails after
-            // the card write, the service retains the backup and pauses the project.
+            // the card write, the service reports the error and the card waits for reconnect.
             const actual = await worldDigest(await readWorld(job.expected.worldName));
-            if (actual !== job.expected.world) throw new Error('角色卡已写入，但世界书发生并发变化；已停止后续写入。请检查备份和差异。');
+            if (actual !== job.expected.world) throw new Error('角色卡已写入，但世界书发生并发变化；已停止后续写入。请重新连接。');
             report.world = await syncWorld(name, book);
             try { await refreshWorld(name); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
         } else report.world = { skipped: name ? '节点没有内嵌条目，未改外置世界书' : '卡未绑定外置世界书' };
         try { report.refreshed = await refreshCards([job.avatar]); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
         return report;
     }
-    async function restore(job) {
-        if (typeof job.pngBase64 !== 'string' || !job.pngBase64) throw new Error('备份缺少PNG内容。');
-        if (job.worldName && !Object.hasOwn(job, 'worldRaw')) throw new Error('备份缺少世界书原始数据。');
-        await assertExpected(job);
-        const deleteMissingWorld = job.worldName && job.worldRaw === null
-            ? (await import('/scripts/world-info-persistence.js')).deleteWorldInfoDocument : null;
+    // 新建卡（作者决定 2026-10-27）：后台按本地工程合成好 PNG，卡名和世界书名都已避开重名。
+    // 用酒馆自己的导入接口建卡（preserved_name 固定文件名），再新建世界书；不碰已有的卡和世界书
+    async function create(job) {
+        const st = getContext();
+        await st.getCharacters();
+        if (getContext().characters.some(card => card.avatar.toLowerCase() === job.avatar.toLowerCase())) throw new Error(`酒馆里已经有「${job.avatar}」，没有覆盖。`);
+        if (job.worldName && await readWorld(job.worldName) !== null) throw new Error(`酒馆里已经有世界书「${job.worldName}」，没有覆盖。`);
         const bytes = Uint8Array.from(atob(job.pngBase64), c => c.charCodeAt(0));
         const form = new FormData();
         form.append('avatar', new Blob([bytes], { type: 'image/png' }), job.avatar);
@@ -108,20 +109,15 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         const headers = new Headers(getContext().getRequestHeaders());
         headers.delete('Content-Type');
         const response = await fetchImpl('/api/characters/import', { method: 'POST', headers, body: form });
-        if (!response.ok) throw new Error(`备份导入失败：HTTP ${response.status} ${(await response.text()).slice(0, 300)}`);
+        if (!response.ok) throw new Error(`建卡失败：HTTP ${response.status} ${(await response.text()).slice(0, 300)}`);
         const imported = await response.json();
         const avatar = imported.character?.avatar ?? `${imported.file_name}.png`;
-        if (avatar !== job.avatar) throw new Error(`备份已导入，但返回的角色文件名不是预期值：${avatar}`);
-        if (job.worldName) {
-            if (deleteMissingWorld) await deleteMissingWorld(job.worldName);
-            else await writeWorld(job.worldName, JSON.parse(job.worldRaw));
-        }
-        const report = { id: job.id, avatar, restored: true, mode: 'import' };
+        const report = { id: job.id, avatar, created: true };
+        if (job.worldName) report.world = await syncWorld(job.worldName, job.book ?? { entries: [] });
         try {
             if (job.worldName) await refreshWorld(job.worldName);
             report.refreshed = await refreshCards([avatar]);
         } catch (error) { report.refreshWarning = String(error?.message ?? error); }
         return report;
-    }
-    return { assertExpected, runWorld, runCard, restore };
+    }    return { assertExpected, runWorld, runCard, create };
 }

@@ -1,16 +1,18 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { readSlotsFromNodes, readSlotsFromCard, readSlotsFromTavern, attachNodeSettings, loadSyncState, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extrasLib } from './slots.mjs';
+import { BRIDGE_ROOT } from './connection.mjs';
+import { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extrasLib } from './slots.mjs';
 import { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } from './safety.mjs';
 import { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } from './projects.mjs';
-import { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline, matchRebindEntries, setEntryUid } from './world-entry-ids.mjs';
+import { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline } from './world-entry-ids.mjs';
 import { publishCardJob, getJobResult } from './bridge.mjs';
 import { inspectSkillsAndAgents, deploySkillsAndAgents } from './skills.mjs';
 
 const BODY = '<!-- body -->';
+// 1×1 透明 PNG：工程没有封面、也没有旧卡图时新建卡用
+const BLANK_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const BODY_FIELDS = new Set(['description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions', 'alternate_greetings', 'character_book']);
 // 正则、脚本、变量、小白X任务按槽位逐项比，不算卡设置
 function cardSettings(card) {
@@ -29,41 +31,8 @@ function settingDifferences(node, remote, prefix = '') {
   }
   return out;
 }
-const IMPORT_METADATA = [['create_date'], ['chat'], ['fav'], ['extensions', 'fav']];
-const IMPORT_NOTICE = 'PNG导入会重编码；创建日期、聊天关联和收藏按宿主语义变化，不是原字节恢复。';
-const slotSignature = slots => hashObject(Object.fromEntries(Object.entries(slots).map(([key, value]) => [key, { value: value.value, settings: value.settings ?? null }])));
-function importSettings(card) {
-  const result = structuredClone(cardSettings(card));
-  for (const keys of IMPORT_METADATA) { let parent = result; for (const key of keys.slice(0, -1)) parent = parent?.[key]; if (parent) delete parent[keys.at(-1)]; }
-  return result;
-}
-function importedRoot(raw, card, YAML) {
-  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  if (!match) return raw;
-  const doc = YAML.parseDocument(match[1]); let changed = false;
-  for (const [prefix, data] of [[['tavern'], card], [['tavern', 'data'], card.data ?? card]]) {
-    for (const keys of IMPORT_METADATA) {
-      const at = [...prefix, ...keys]; if (!doc.hasIn(at)) continue;
-      const value = keys.reduce((v, key) => v?.[key], data);
-      if (JSON.stringify(doc.getIn(at)?.toJSON?.() ?? doc.getIn(at)) === JSON.stringify(value)) continue;
-      if (value === undefined) doc.deleteIn(at); else doc.setIn(at, value); changed = true;
-    }
-  }
-  if (!changed) return raw;
-  const eol = raw.includes('\r\n') ? '\r\n' : '\n';
-  return `---${eol}${String(doc).trimEnd().replaceAll('\n', eol)}${eol}---` + raw.slice(match[0].length);
-}
-function verifyImportedRestore(backup, remote) {
-  const card = readCardPng(Buffer.from(backup.pngBase64, 'base64'));
-  const expected = readSlotsFromCard(card, { worldRaw: backup.worldRaw });
-  if (slotSignature(expected.slots) !== slotSignature(remote.tavern.slots) || backup.worldName !== remote.worldName || hashObject(backup.worldRaw === null ? null : JSON.parse(backup.worldRaw)) !== hashObject(remote.worldRaw === null ? null : JSON.parse(remote.worldRaw)) || settingDifferences(importSettings(card), importSettings(remote.tavern.card)).length) fail('RESTORE_VERIFY_FAILED', '导入后的正文、设置或世界书与备份不同；未确认恢复成功');
-}
 export class FileSyncAdapter {
-  constructor({ skillsRoot, userDir, cardsRoot = null, transport = publishCardJob, queryResult = getJobResult, restoreMode = 'import' }) { this.skillsRoot = skillsRoot; this.userDir = userDir; this.cardsRoot = cardsRoot; this.transport = transport; this.queryResult = queryResult; this.restoreMode = restoreMode; }
-  restoreSupport(project, backup, currentWorldName) {
-    const blockedReason = this.restoreMode !== 'import' ? '导入恢复不可用' : !backup.pngBase64 || project.cardFile.startsWith('world:') ? '备份不是完整角色卡PNG' : backup.cardFile !== project.cardFile ? '同工程旧绑定备份；当前不支持跨名恢复' : currentWorldName !== undefined && backup.worldName !== currentWorldName ? '当前世界书绑定与备份不同，不能跨绑定恢复' : null;
-    return { mode: this.restoreMode, canRestore: !blockedReason, blockedReason, notice: IMPORT_NOTICE };
-  }
+  constructor({ skillsRoot, userDir, cardsRoot = null, transport = publishCardJob, queryResult = getJobResult }) { this.skillsRoot = skillsRoot ? path.resolve(BRIDGE_ROOT, skillsRoot) : path.resolve(BRIDGE_ROOT, '../card-forge-lab'); this.userDir = userDir; this.cardsRoot = cardsRoot; this.transport = transport; this.queryResult = queryResult; }
   operationFile(project) { return contained(project.dir, '.card-forge/operation.json'); }
   localSnapshot(project) {
     const rawFiles = Object.fromEntries(nodeFiles(project.dir).map(rel => [rel, fs.readFileSync(contained(project.dir, rel), 'utf8')]));
@@ -101,11 +70,10 @@ export class FileSyncAdapter {
     if (own?.cardFile && project.cardFile && own.cardFile !== project.cardFile) fail('BINDING_CONFLICT', 'CLI目标与工程既有绑定不同');
     if (project.cardFile && records.some(p => !sameProjectPath(p.dir, project.dir) && !(replacing && sameProjectPath(p.dir, replacing)) && targetOccupied(p, project.cardFile))) fail('TARGET_OCCUPIED', '同一目标仍由其他工程占用，包含其未决或待恢复操作');
   }
-  async assertAvailable(project, { restoring = false, lifecycleId } = {}) {
+  async assertAvailable(project, { lifecycleId } = {}) {
     this.assertTargetAvailable(project);
     const binding = readJson(contained(project.dir, '.card-forge/bridge.json'));
-    if (binding?.restoreRequired && !restoring) fail('RESTORE_REQUIRED', '完整恢复未完成；CLI与后台均禁止继续同步');
-    if (binding?.operation && binding.operation.id !== lifecycleId) fail('OPERATION_PENDING', '建卡或改名尚未完整确认；禁止重复操作');
+    if (binding?.operation && binding.operation.id !== lifecycleId) fail('OPERATION_PENDING', '上次建卡或改名没有完成；先处理，不会重复执行');
     const operation = readJson(this.operationFile(project));
     if (!operation) return;
     if (operation.state === 'reviewRequired') fail('OPERATION_REVIEW_REQUIRED', '未知写入或中途本地变化需要人工复核；不会自动清理记录');
@@ -116,10 +84,10 @@ export class FileSyncAdapter {
     this.finishOperation(project, operation, result);
   }
   async send(project, job, snapshot = null) {
-    await this.assertAvailable(project, { restoring: job.op === 'restore', lifecycleId: job.id });
+    await this.assertAvailable(project, { lifecycleId: job.id });
     const local = this.localSnapshot(project);
     if (snapshot && snapshot.localHash !== local.localHash) fail('STALE_LOCAL', '提交前本地工程改变');
-    const operation = { jobId: job.id, cardFile: project.cardFile, targetCardFile: job.op === 'rename' ? `${job.newName}.png` : project.cardFile, kind: job.op ?? 'push', state: 'pending', startedAt: new Date().toISOString(), localHash: local.localHash, expected: job.expected ?? null,
+    const operation = { jobId: job.id, cardFile: project.cardFile, targetCardFile: job.op === 'rename' ? `${job.newName}.png` : job.op === 'create' ? job.avatar : project.cardFile, kind: job.op ?? 'push', state: 'pending', startedAt: new Date().toISOString(), localHash: local.localHash, expected: job.expected ?? null,
       plannedSlots: snapshot ? Object.fromEntries(Object.entries(snapshot.nodes.slots).map(([k, v]) => [k, slotHash(v.value)])) : null };
     const file = this.operationFile(project); fs.mkdirSync(path.dirname(file), { recursive: true });
     try { fs.writeFileSync(file, JSON.stringify(operation, null, 2) + '\n', { flag: 'wx' }); }
@@ -145,13 +113,11 @@ export class FileSyncAdapter {
     const worldRaw = tavern.worldRaw ?? null;
     return { tavern, png, worldName, worldRaw, expected: { card: png ? digest(png) : null, worldName, world: worldRaw === null ? null : hashObject(JSON.parse(worldRaw)) } };
   }
-  async snapshot(project) {
-    const local = this.localSnapshot(project);
-    const { rawFiles, pendingFiles, baselineRaw } = local;
-    const libs = await this.libraries(), { nodes: lib, fp, build, protocol, unpack } = libs;
+  // 读本地工程并做格式检查。同步和新建卡共用
+  async scanLocal(project, libs) {
     let scan;
     // regex/、scripts/ 里 JSON 写坏时 scanCard 会抛错：报成格式错误，写明是哪个文件，不当成后台故障
-    try { scan = await lib.scanCard(project.dir); }
+    try { scan = await libs.nodes.scanCard(project.dir); }
     catch (e) { fail('INVALID_FORMAT', `「${project.id}」有文件格式不对，整张卡本轮没有同步：${e.message}`, 422, { badFiles: [{ relPath: null, message: e.message }] }); }
     // 文件开头设置写坏、正文边界标记缺失或重复时列出文件名。不能只跳过这个文件继续推送：
     // 推送的是整张合成卡，少一个文件就等于删掉酒馆里对应的条目
@@ -167,6 +133,25 @@ export class FileSyncAdapter {
         422,
       );
     }
+    return scan;
+  }
+  // 按本地工程合成整张卡；worldOverride 是新建卡时起的新世界书名（只记在 bridge.json，不改 card.md）
+  assembleCard(scan, build, worldOverride, nameOverride = null) {
+    const built = build.assemble(scan);
+    if (built.card.data) {
+      if (nameOverride) { built.card.name = nameOverride; built.card.data.name = nameOverride; }
+      if (worldOverride) {
+        (built.card.data.extensions ??= {}).world = worldOverride;
+        if (built.card.data.character_book) built.card.data.character_book.name = worldOverride;
+      }
+    }
+    return built;
+  }
+  async snapshot(project) {
+    const local = this.localSnapshot(project);
+    const { rawFiles, pendingFiles, baselineRaw } = local;
+    const libs = await this.libraries(), { nodes: lib, fp, build, protocol, unpack } = libs;
+    const scan = await this.scanLocal(project, libs);
     if (this.localSnapshot(project).localHash !== local.localHash) fail('STALE_LOCAL', '扫描期间工程文件改变，请重新检查');
     const remote = this.remote(project);
     const saved = baselineRaw ? JSON.parse(baselineRaw) : null;
@@ -175,13 +160,9 @@ export class FileSyncAdapter {
     assertUniqueEntryUids(scan, lib, fp);
     const validation = protocol.validateNodes(scan);
     if (validation.errors.length) fail('INVALID_PROJECT', protocol.formatReport(validation), 422);
-    const built = build.assemble(scan);
-    // 「新建副本」导入时世界书改用不重名的名字：只记在 bridge.json，不改工程 card.md
-    const worldOverride = readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
-    if (worldOverride && !project.cardFile.startsWith('world:') && built.card.data) {
-      (built.card.data.extensions ??= {}).world = worldOverride;
-      if (built.card.data.character_book) built.card.data.character_book.name = worldOverride;
-    }
+    const worldOverride = project.cardFile.startsWith('world:') ? null : readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
+    const nameOverride = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
+    const built = this.assembleCard(scan, build, worldOverride, nameOverride);
     const nodes = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan);
     for (const [key, slot] of Object.entries(nodes.slots)) if (key.startsWith('entry:') && isWorldEntryPath(slot.relPath)) slot.newEntryEligible = true;
     const targetWorld = built.card.data?.extensions?.world || null;
@@ -284,6 +265,8 @@ export class FileSyncAdapter {
         continue;
       }
       if (!rel || planned[rel] === undefined) fail('INVALID_SLOT', `没有节点：${key}`, 400);
+      // 酒馆那边删了这条世界书条目：删掉本地对应的条目文件
+      if (value === null && key.startsWith('entry:')) { delete planned[rel]; deleted.add(rel); continue; }
       let raw = planned[rel];
       // 没有开头设置的散文件：整文件就是正文，直接整体替换
       if (!/^\uFEFF?---\r?\n/.test(raw)) { const eol = raw.includes('\r\n') ? '\r\n' : '\n'; planned[rel] = value.replaceAll('\n', eol) + eol; continue; }
@@ -389,105 +372,6 @@ export class FileSyncAdapter {
     if (snapshot.baseline && hashObject(slots) === hashObject(snapshot.baseline.slots ?? {}) && hashObject(pending) === hashObject(snapshot.baseline.pending ?? {}) && hashObject(settings) === hashObject(snapshot.baseline.settings ?? {})) return;
     saveSyncState(project.dir, project.cardFile, slots, pending, Object.keys(settings).length ? settings : undefined);
   }
-  // 备份位置：留空时为 cards/backups/<卡名>/，填了就是 <填的目录>/<卡名>/；每次一个时间子文件夹
-  backupRoot(project, backupDir = '') {
-    const name = segment(project.name ?? path.basename(project.dir), '工程名');
-    const raw = typeof backupDir === 'string' ? backupDir.trim() : '';
-    const base = raw ? path.resolve(path.isAbsolute(raw) ? raw : path.join(this.cardsRoot ?? path.dirname(project.dir), raw)) : path.join(this.cardsRoot ?? path.dirname(project.dir), 'backups');
-    if (sameProjectPath(base, project.dir) || path.resolve(base).toLowerCase().startsWith(path.resolve(project.dir).toLowerCase() + path.sep)) fail('INVALID_BACKUP_DIR', '备份位置不能在工程文件夹里', 400);
-    return path.join(base, name);
-  }
-  async backup(project, snapshot, { backupDir = '', backupKeep } = {}) {
-    const id = new Date().toISOString().replace(/[:.]/g, '-') + `-${crypto.randomUUID().slice(0, 8)}`;
-    const dir = path.join(this.backupRoot(project, backupDir), id);
-    fs.mkdirSync(dir, { recursive: true });
-    const stateFile = contained(project.dir, '.card-forge/tavern-sync.json');
-    const data = { format: 1, id, projectKey: readJson(contained(project.dir, '.card-forge/bridge.json'))?.projectKey ?? null, cardFile: project.cardFile, createdAt: new Date().toISOString(), nodes: snapshot.rawFiles, pendingFiles: snapshot.pendingFiles,
-      baselineRaw: fs.existsSync(stateFile) ? fs.readFileSync(stateFile, 'utf8') : null,
-      pngBase64: snapshot.png?.toString('base64') ?? null, worldName: snapshot.worldName, worldRaw: snapshot.worldRaw };
-    atomicJson(path.join(dir, 'snapshot.json'), { ...data, checksum: hashObject(data) });
-    // 同时放一份能直接用的文件：酒馆卡 PNG、世界书 JSON、工程文件
-    if (snapshot.png && project.cardFile && !project.cardFile.startsWith('world:')) fs.writeFileSync(path.join(dir, project.cardFile), snapshot.png);
-    if (snapshot.worldRaw !== null && snapshot.worldRaw !== undefined) fs.writeFileSync(path.join(dir, `${snapshot.worldName || 'world'}.json`), snapshot.worldRaw, 'utf8');
-    for (const [rel, text] of Object.entries(snapshot.rawFiles ?? {})) {
-      const dst = contained(dir, `工程/${rel}`);
-      fs.mkdirSync(path.dirname(dst), { recursive: true });
-      fs.writeFileSync(dst, text, 'utf8');
-    }
-    this.pruneBackups(project, backupDir, backupKeep);
-    return id;
-  }
-  // 只保留最近 keep 份。只动同步前自动生成的快照（时间戳-8位编号）；「接入前的工程」整目录备份和作者自己放的东西不计数、不删。keep 为 0 或没给时全部保留
-  pruneBackups(project, backupDir = '', keep) {
-    if (!Number.isInteger(keep) || keep <= 0) return [];
-    const root = this.backupRoot(project, backupDir);
-    if (!fs.existsSync(root)) return [];
-    const stamped = fs.readdirSync(root, { withFileTypes: true })
-      .filter(e => e.isDirectory() && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{8}$/.test(e.name))
-      .map(e => e.name).sort().reverse();
-    const removed = stamped.slice(keep);
-    for (const name of removed) fs.rmSync(path.join(root, name), { recursive: true, force: true });
-    return removed;
-  }
-  backups(project) {
-    const root = this.backupRoot(project);
-    if (!fs.existsSync(root)) return [];
-    return fs.readdirSync(root, { withFileTypes: true }).filter(e => e.isDirectory()).map(e => {
-      try {
-        const b = this.readBackup(project, e.name), bindingChanged = b.cardFile !== project.cardFile;
-        const support = this.restoreSupport(project, b);
-        return { id: e.name, createdAt: b.createdAt, cardFile: b.cardFile, supported: true, bindingChanged, restorable: support.canRestore, mode: support.mode, notice: support.notice, ...(support.blockedReason ? { reason: support.blockedReason } : {}) };
-      }
-      catch (error) { return { id: e.name, createdAt: null, supported: false, reason: error.message }; }
-    }).sort((a, b) => b.id.localeCompare(a.id));
-  }
-  readBackup(project, id) {
-    segment(id, '备份名');
-    const backup = readJson(path.join(this.backupRoot(project), id, 'snapshot.json'));
-    if (!backup || backup.format !== 1 || !backup.pendingFiles) fail('UNSUPPORTED_BACKUP', '旧备份没有完整节点、待归位文件、同步基线和酒馆快照；只读，不支持恢复');
-    const { checksum, ...data } = backup;
-    if (checksum !== hashObject(data) || !backup.nodes || !Object.hasOwn(backup, 'baselineRaw')) fail('INVALID_BACKUP', '备份校验或结构无效');
-    if (backup.cardFile !== project.cardFile && (!backup.projectKey || backup.projectKey !== readJson(contained(project.dir, '.card-forge/bridge.json'))?.projectKey)) fail('BACKUP_BINDING_CHANGED', '旧绑定备份缺少可核实工程身份；只读，不按损坏处理');
-    for (const rel of Object.keys(backup.nodes)) {
-      if (!isCardFile(rel) || rel.split('/').some(p => p.startsWith('.'))) fail('INVALID_BACKUP', '备份包含非工程文件路径');
-      contained(project.dir, rel);
-    }
-    for (const rel of Object.keys(backup.pendingFiles)) { if (!rel.startsWith('待归位/')) fail('INVALID_BACKUP', '待归位备份路径无效'); contained(project.dir, rel); }
-    return backup;
-  }
-  async restore(project, backup, expectedRevision, { skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep } = {}) {
-    if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖恢复前，必须勾选确认自行承担数据丢失责任', 400);
-    const support = this.restoreSupport(project, backup);
-    if (!support.canRestore) fail('UNSUPPORTED_RESTORE', support.blockedReason, 409);
-    await this.assertAvailable(project, { restoring: true });
-    const current = await this.snapshot(project);
-    if (current.revision !== expectedRevision) fail('STALE_PREVIEW', '恢复预览后内容改变');
-    if (!backup.pngBase64) fail('UNSUPPORTED_BACKUP', '此备份不是完整角色卡备份');
-    if (backup.worldName !== current.worldName) fail('UNSUPPORTED_RESTORE', '当前世界书绑定与备份不同；不能在未预览另一世界书时恢复');
-    const safetyBackupId = skipBackup ? null : await this.backup(project, current, { backupDir, backupKeep });
-    const result = await this.send(project, { id: crypto.randomUUID(), op: 'restore', avatar: project.cardFile, pngBase64: backup.pngBase64, worldName: backup.worldName, world: backup.worldRaw === null ? null : JSON.parse(backup.worldRaw), worldRaw: backup.worldRaw, expected: current.expected }, current);
-    if (!result || result.fatal || result.restored !== true) fail('RESTORE_FAILED', result?.fatal ?? '酒馆未确认完整恢复；保持该卡暂停', 502);
-    // PNG import may change host-owned metadata; body slots, author settings and world data may not.
-    const remote = this.remote(project); verifyImportedRestore(backup, remote);
-    const { YAML } = await this.libraries(), plannedNodes = { ...backup.nodes };
-    if (plannedNodes['card.md']) plannedNodes['card.md'] = importedRoot(plannedNodes['card.md'], remote.tavern.card, YAML);
-    if (this.localSnapshot(project).localHash !== current.localHash) fail('RESTORE_LOCAL_CHANGED', '远端恢复后工程已变动；未覆盖节点，保持暂停');
-    for (const rel of nodeFiles(project.dir)) if (!(rel in plannedNodes)) fs.unlinkSync(contained(project.dir, rel));
-    for (const [rel, text] of Object.entries(plannedNodes)) {
-      const file = contained(project.dir, rel); fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text, 'utf8');
-    }
-    for (const rel of new Set([...Object.keys(current.pendingFiles), ...Object.keys(backup.pendingFiles)])) {
-      const file = contained(project.dir, rel), text = backup.pendingFiles[rel];
-      if (text === null || text === undefined) { if (fs.existsSync(file)) fs.unlinkSync(file); }
-      else { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text, 'utf8'); }
-    }
-    const pending = backup.baselineRaw ? JSON.parse(backup.baselineRaw).pending ?? {} : {};
-    for (const [key, item] of Object.entries(pending)) if (remote.tavern.slots[key]) item.tavern = slotHash(remote.tavern.slots[key].value);
-    saveSyncState(project.dir, project.cardFile, Object.fromEntries(Object.entries(remote.tavern.slots).map(([key, slot]) => [key, slotHash(slot.value)])), pending);
-    const after = await this.snapshot(project); verifyImportedRestore(backup, after);
-    if (hashObject(after.rawFiles) !== hashObject(plannedNodes) || hashObject(after.pendingFiles) !== hashObject(backup.pendingFiles)) fail('RESTORE_VERIFY_FAILED', '节点或待归位文件恢复验证失败；保持暂停');
-    return { status: 'restored', mode: 'import', backupId: backup.id, safetyBackupId, backupSkipped: Boolean(skipBackup), paused: true, notice: IMPORT_NOTICE };
-  }
   // 拆前扫描：列出卡里的正则、脚本、变量、小白X任务，并识别变量框架。只读
   scanCard(cardFile) {
     segment(cardFile, '卡文件名');
@@ -505,6 +389,21 @@ export class FileSyncAdapter {
     const dir = path.join(this.userDir, 'worlds');
     if (!fs.existsSync(dir)) return [];
     return fs.readdirSync(dir, { withFileTypes: true }).filter(e => e.isFile() && /\.json$/i.test(e.name)).map(e => ({ worldName: path.basename(e.name, '.json') }));
+  }
+  // 实时同步用：参与同步的文件、卡 PNG、绑定世界书的修改时间和大小。只看文件信息，不读正文
+  changeStamp(project) {
+    const info = file => { try { const s = fs.statSync(file); return `${s.mtimeMs}:${s.size}`; } catch { return null; } };
+    const local = nodeFiles(project.dir).map(rel => [rel, info(contained(project.dir, rel))]);
+    const bridge = info(contained(project.dir, '.card-forge/bridge.json'));
+    let card = null, worldName = null;
+    if (project.cardFile?.startsWith('world:')) worldName = project.cardFile.slice(6);
+    else if (project.cardFile) {
+      const file = path.join(this.userDir, 'characters', project.cardFile);
+      card = info(file);
+      try { worldName = readCardPng(file)?.data?.extensions?.world || null; } catch { worldName = null; }
+    }
+    const world = worldName ? info(worldFilePath(worldName, this.userDir)) : null;
+    return hashObject({ local, bridge, card, worldName, world });
   }
   // 只按参与同步的文件计算：根目录放笔记、草稿、调研不会触发同步检查
   localRevision(project) {
@@ -541,45 +440,41 @@ export class FileSyncAdapter {
     const eol = raw.includes('\r\n') ? '\r\n' : '\n';
     fs.writeFileSync(file, `---${eol}${String(doc).trimEnd().replaceAll('\n', eol)}${eol}---` + raw.slice(match[0].length), 'utf8');
   }
-  // 「导入酒馆」：像酒馆「从文件导入角色」一样的独立操作。面板把作者选的文件夹里的卡文件传上来，
-  // 这里在临时目录用和导出相同的装卡命令合成一张 PNG 交回面板，由酒馆自己的导入接口建卡（重名加编号也由酒馆做）。
-  // 不读写工作区、不建绑定、不做同步，之后作者什么时候拆、什么时候连都和这次无关。
-  async buildCardFromFiles({ name, paths = [], files } = {}) {
-    segment(name, '文件夹名');
-    if (!files || typeof files !== 'object' || Array.isArray(files)) fail('INVALID_FILES', '没有收到文件', 400);
-    const all = new Set([...(Array.isArray(paths) ? paths : []), ...Object.keys(files)].map(p => String(p).replaceAll('\\', '/')));
-    if (!all.has('card.md') && [...all].some(p => p === 'index.md' || /^(world|character|greeting|output|style)\//.test(p))) {
-      fail('LEGACY_PROJECT', '这是旧版 index.md 节点目录；请先运行 node card-forge-lab/src/cli.mjs migrate "<旧卡目录>" --out "<新标准卡目录>" 迁移为 card.md 新结构', 422);
-    }
-    const cardFiles = Object.keys(files).map(p => p.replaceAll('\\', '/')).filter(p => p === 'card.md' || isCardFile(p));
-    if (!cardFiles.length) fail('INVALID_PROJECT', `「${name}」里没有卡工程文件（card.md、字段 .md、message\\、world_book\\）；请选择卡工程文件夹本身`, 422);
-    const { build } = await this.libraries();
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tt-import-'));
-    try {
-      const dir = path.join(tmp, 'card');
-      for (const [raw, value] of Object.entries(files)) {
-        const rel = raw.replaceAll('\\', '/');
-        if (rel !== 'card.md' && !isCardFile(rel)) continue;
-        if (typeof value !== 'string') fail('INVALID_FILES', `${rel} 不是文本`, 400);
-        const dst = contained(dir, rel);
-        fs.mkdirSync(path.dirname(dst), { recursive: true });
-        fs.writeFileSync(dst, value, 'utf8');
-      }
-      // 只有散文件的工程：在临时目录补一个卡根，作者的文件夹不动
-      if (!fs.existsSync(path.join(dir, 'card.md'))) fs.writeFileSync(path.join(dir, 'card.md'), `---\nid: card-root\ntype: card\nname: ${JSON.stringify(name)}\n---\n\n${BODY}\n`, 'utf8');
-      if (typeof files['character.png'] !== 'string' || !files['character.png']) fail('INVALID_FILES', '缺少封面图', 400);
-      const cover = path.join(tmp, 'cover.png');
-      fs.writeFileSync(cover, Buffer.from(files['character.png'], 'base64'));
-      const result = await build.buildCmd(dir, { png: cover });
-      if (!result.ok || !result.pngPath) fail('INVALID_PROJECT', result.report, 422);
-      return { name, fileName: path.basename(result.pngPath), pngBase64: fs.readFileSync(result.pngPath).toString('base64'), report: result.report };
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
-    }
+  // 新建卡（作者决定 2026-10-27）：按本地工程新建一张卡和一本世界书。卡文件名和世界书名重名时都起新名字，
+  // 新卡不连酒馆里已有的同名世界书。只算名字，不写任何东西
+  async planNewCard(project) {
+    const libs = await this.libraries();
+    const scan = await this.scanLocal(project, libs);
+    const configured = this.assembleCard(scan, libs.build, null).card.data?.extensions?.world || null;
+    const free = (base, taken) => { for (let i = 1; ; i++) { const name = i === 1 ? base : `${base} ${i}`; if (!taken.has(name.toLowerCase())) return name; } };
+    const cards = new Set(this.listCards().map(c => c.name.toLowerCase()));
+    const worlds = new Set(this.listWorlds().map(w => w.worldName.toLowerCase()));
+    const cardFile = `${free(project.name, cards)}.png`;
+    const worldName = configured ? free(configured, worlds) : null;
+    return { cardFile, worldName, worldOverride: worldName && worldName !== configured ? worldName : null };
   }
-  async rename(project, jobId) {
+  // 封面：工程里的 character.png，其次原来那张卡的图，都没有时用一张空白图
+  coverOf(project) {
+    const own = path.join(project.dir, 'character.png');
+    const old = project.cardFile && !project.cardFile.startsWith('world:') ? [path.join(this.userDir, 'characters', project.cardFile), path.join(project.dir, '.card-forge', 'originals', project.cardFile)] : [];
+    const found = [own, ...old].find(p => fs.existsSync(p));
+    return found ? fs.readFileSync(found) : BLANK_PNG;
+  }
+  async createCard(project, jobId, plan) {
+    const libs = await this.libraries();
+    const scan = await this.scanLocal(project, libs);
+    const validation = libs.protocol.validateNodes(scan);
+    if (validation.errors.length) fail('INVALID_PROJECT', libs.protocol.formatReport(validation), 422);
+    const card = this.assembleCard(scan, libs.build, plan.worldName, path.basename(plan.cardFile, '.png')).card;
+    const pngBase64 = libs.png.embedChara(this.coverOf(project), card).toString('base64');
+    const book = card.data?.character_book ?? { entries: [] };
+    const result = await this.send(project, { id: jobId, op: 'create', avatar: plan.cardFile, pngBase64, worldName: plan.worldName, book });
+    if (!result || result.fatal) fail('CREATE_FAILED', result?.fatal ?? '酒馆没有确认建卡', 502);
+    if (result.avatar !== plan.cardFile) fail('CREATE_MISMATCH', `酒馆建卡后返回的文件名是 ${result.avatar}，不是 ${plan.cardFile}；需要核实`);
+    return { cardFile: result.avatar, worldName: plan.worldName };
+  }
+  hasPendingOperation(project) { return fs.existsSync(this.operationFile(project)); }  async rename(project, jobId) {
     const snapshot = await this.snapshot(project);
-    const backupId = await this.backup(project, snapshot);
     const result = await this.send(project, { id: jobId, op: 'rename', avatar: project.cardFile, newName: project.name, expected: snapshot.expected, expectedTargetAbsent: true }, snapshot);
     if (!result || result.fatal) fail('RENAME_FAILED', result?.fatal ?? '酒馆未确认改名', 502);
     segment(result.avatar, '返回的卡文件名');
@@ -587,7 +482,7 @@ export class FileSyncAdapter {
     await this.setRoot(project, [[['name'], project.name]]);
     const file = contained(project.dir, '.card-forge/tavern-sync.json'), baseline = readJson(file);
     if (baseline?.cardFile === project.cardFile) atomicJson(file, { ...baseline, cardFile: result.avatar });
-    return { cardFile: result.avatar, backupId };
+    return { cardFile: result.avatar };
   }
   async validateWorldProject(project, worldName) {
     await this.assertAvailable({ ...project, cardFile: `world:${worldName}` });
@@ -596,21 +491,6 @@ export class FileSyncAdapter {
     const configured = build.assemble(scan).card.data?.extensions?.world;
     if (configured && configured !== worldName) fail('BINDING_CONFLICT', '工程世界书名与CLI目标不同');
     if (!fs.existsSync(worldFilePath(worldName, this.userDir))) fail('WORLD_NOT_FOUND', '世界书不存在；不能自动覆盖其他目标');
-  }
-  // 改动清单里的修改时间，只作参考。工程按条目文件算；酒馆只有整张卡 PNG 和整本世界书 JSON 的时间，不是单条的
-  fileTimes(project, snapshot, keys = null) {
-    const iso = file => { try { return fs.statSync(file).mtime.toISOString(); } catch { return null; } };
-    const local = {};
-    for (const [key, slot] of Object.entries(snapshot.nodes?.slots ?? {})) {
-      if (keys && !keys.includes(key)) continue;
-      if (!slot.relPath) continue;
-      try { local[key] = iso(contained(project.dir, String(slot.relPath).split(path.sep).join('/'))); } catch { local[key] = null; }
-    }
-    const worldOnly = project.cardFile.startsWith('world:');
-    let card = null, world = null;
-    if (!worldOnly) { try { card = iso(contained(path.join(this.userDir, 'characters'), project.cardFile)); } catch { /* 无效文件名不显示时间 */ } }
-    if (snapshot.worldName) { try { world = iso(worldFilePath(snapshot.worldName, this.userDir)); } catch { /* 同上 */ } }
-    return { local, card, world };
   }
   // 覆盖拆解时怎么处理旧工程：卡内容文件（与同步、装卡同一口径的 nodeFiles）按酒馆当前内容重新生成，
   // 其余文件（记录/、候选/、待归位/、note/、调研.md、封面等）原样搬进新工程。.card-forge/ 是同步记录，重新建立
@@ -629,70 +509,13 @@ export class FileSyncAdapter {
     for (const rel of keep) { const top = rel.includes('/') ? `${rel.split('/')[0]}/` : rel; groups.set(top, (groups.get(top) ?? 0) + 1); }
     return { replace: [...replace].sort(), keep: keep.sort(), keepGroups: [...groups].map(([path, files]) => ({ path, files })).sort((a, b) => a.path.localeCompare(b.path)) };
   }
-  // 改连前的条目配对：只读。列出哪些本地条目要换成新卡的编号、哪些要作者选、哪些两边对不上
-  async planRebind(project, cardFile, choices = {}) {
-    segment(cardFile, '卡文件名');
-    const { nodes: lib, fp, build } = await this.libraries();
-    const local = this.localSnapshot(project);
-    let scan;
-    try { scan = await lib.scanCard(project.dir); }
-    catch (e) { fail('INVALID_FORMAT', `「${project.id}」有文件格式不对，不能改连：${e.message}`, 422); }
-    const bad = scan.nodes.flatMap(n => n.problems.filter(p => ['P0', 'P1', 'P2'].includes(p.rule)).map(p => `${n.relPath.split(path.sep).join('/')}（${p.message}）`));
-    if (bad.length) fail('INVALID_FORMAT', `「${project.id}」有 ${bad.length} 处格式不对，不能改连：${bad.slice(0, 5).join('；')}${bad.length > 5 ? ' 等' : ''}`, 422);
-    assertUniqueEntryUids(scan, lib, fp);
-    const built = build.assemble(scan);
-    const slots = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan).slots;
-    const norm = s => String(s ?? '').replaceAll('\r\n', '\n').trim();
-    const locals = Object.entries(slots).filter(([k]) => k.startsWith('entry:'))
-      .map(([k, s]) => ({ relPath: s.relPath.split(path.sep).join('/'), title: String(s.builtEntry?.comment ?? ''), body: s.value, uid: k.slice(6) }));
-    const tavern = readSlotsFromTavern(cardFile, { userDir: this.userDir });
-    const remotes = tavern.worldRaw !== null
-      ? Object.values(JSON.parse(tavern.worldRaw).entries ?? {}).map(e => ({ uid: e.uid, title: String(e.comment ?? ''), body: norm(e.content) }))
-      : ((tavern.card.data ?? tavern.card).character_book?.entries ?? []).map(e => ({ uid: e.id, title: String(e.comment ?? ''), body: norm(e.content) }));
-    const match = matchRebindEntries(locals, remotes, choices);
-    const planId = hashObject({ localHash: local.localHash, card: digest(tavern.png), world: tavern.worldRaw, choices, changes: match.changes }).slice(0, 16);
-    return { cardFile, localCount: locals.length, remoteCount: remotes.length, ...match, planId };
-  }
-  // 按配对结果改本地文件的 tavern.id：改前把要改的文件备份到「<时间>-改连前的条目」（不计入保留份数）；
-  // 没有 id 的条目顺便补一个固定 id，否则同步时会把新编号当成「被占用」
-  async applyRebind(project, plan, { skipBackup = false, acceptDataLossRisk = false, backupDir = '' } = {}) {
-    if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接改编号前，必须确认自行承担数据丢失责任', 400);
-    const { nodes: lib, YAML } = await this.libraries();
-    const scan = await lib.scanCard(project.dir);
-    const byRel = new Map(scan.nodes.map(n => [n.relPath.split(path.sep).join('/'), n]));
-    const noId = n => n.idImplied === true || n.id === null || n.id === undefined || n.id === '';
-    const ids = new Set(scan.nodes.filter(n => !noId(n)).map(n => String(n.id)));
-    const writes = plan.changes.map(c => {
-      const n = byRel.get(c.relPath);
-      if (!n) fail('STALE_LOCAL', `改连期间文件不见了：${c.relPath}`);
-      const file = contained(project.dir, c.relPath), raw = fs.readFileSync(file, 'utf8');
-      let id = null;
-      if (noId(n)) {
-        const seed = hashObject({ relPath: c.relPath, raw }).slice(0, 24);
-        for (let attempt = 0; ; attempt++) { id = `world-${seed}${attempt ? `-${attempt}` : ''}`; if (!ids.has(id)) break; }
-        ids.add(id);
-      }
-      const uid = /^\d+$/.test(String(c.to)) ? Number(c.to) : c.to;
-      const text = setEntryUid(raw, { uid, id }, lib, YAML), parsed = lib.parseNodeFile(text, n.relPath);
-      if (parsed.problems.length || parsed.body !== n.body || String(parsed.frontmatter?.tavern?.id) !== String(c.to)) fail('INVALID_PROJECT', `改编号会动到 ${c.relPath} 的其他内容；没有写入`);
-      return { ...c, file, raw, text };
-    });
-    let backupId = null;
-    if (!skipBackup && writes.length) {
-      backupId = `${new Date().toISOString().replace(/[:.]/g, '-')}-改连前的条目`;
-      const dir = path.join(this.backupRoot(project, backupDir), backupId);
-      for (const w of writes) { const dst = contained(dir, `工程/${w.relPath}`); fs.mkdirSync(path.dirname(dst), { recursive: true }); fs.writeFileSync(dst, w.raw, 'utf8'); }
-    }
-    for (const w of writes) fs.writeFileSync(w.file, w.text, 'utf8');
-    return { changed: writes.map(({ relPath, title, from, to, reason }) => ({ relPath, title, from, to, reason })), backupId };
-  }
-  async attach(project, { overwrite = false, skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep, keep } = {}) {
+  // 拆解：把酒馆里已有的卡第一次变成本地工程（作者决定 2026-10-27：拆解只做这件事，拆完自动连上）
+  async attach(project, { overwrite = false, keep } = {}) {
     await this.assertAvailable(project);
     if (fs.existsSync(project.dir) && !overwrite) {
       const plan = this.overwritePlan(project.dir);
       fail('ATTACH_CONFLICT', '同名工程目录已存在；拒绝覆盖或自动接入', 409, { replaceCount: plan.replace.length, keepGroups: plan.keepGroups });
     }
-    if (overwrite && skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖同名工程前，必须勾选确认自行承担数据丢失责任', 400);
     const worldOnly = project.cardFile.startsWith('world:');
     if (worldOnly && !fs.existsSync(worldFilePath(project.cardFile.slice(6), this.userDir))) fail('WORLD_NOT_FOUND', '世界书不存在；不能接入', 404);
     const remote = this.remote(project);
@@ -731,12 +554,6 @@ export class FileSyncAdapter {
       await this.saveBaseline(staged, snapshot, true);
       if (fs.existsSync(project.dir)) {
         if (!overwrite) fail('ATTACH_CONFLICT', '接入期间出现同名工程');
-        if (!skipBackup) {
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-          const backupTarget = path.join(this.backupRoot(project, backupDir), `${stamp}-接入前的工程`);
-          fs.mkdirSync(path.dirname(backupTarget), { recursive: true });
-          copyTree(project.dir, backupTarget);
-        }
         // 不进卡的文件搬进新工程，再删旧目录。拆卡只写卡内容文件，两边不会撞名；撞了就停下，不覆盖
         for (const rel of this.overwritePlan(project.dir).keep) {
           const dst = contained(out, rel);

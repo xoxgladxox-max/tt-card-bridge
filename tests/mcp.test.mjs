@@ -31,18 +31,18 @@ function fixture(t) {
 }
 const rejects = (p, code) => assert.rejects(p, e => e.code === code);
 
-test('read returns hash; write requires matching baseHash and backs up before overwrite', async t => {
+test('read returns hash; write requires matching baseHash without creating backups', async t => {
   const { tools, cardsRoot } = fixture(t);
   const r = await tools.read_file({ path: 'A/card.md' });
   assert.equal(r.totalLines, 3);
   await rejects(tools.write_file({ path: 'A/card.md', content: 'x' }), 'BASE_HASH_REQUIRED');
   await rejects(tools.write_file({ path: 'A/card.md', content: 'x', baseHash: 'wrong' }), 'HASH_MISMATCH');
   const w = await tools.write_file({ path: 'A/card.md', content: 'new', baseHash: r.hash });
-  assert.ok(w.backupId); assert.equal(fs.readFileSync(path.join(cardsRoot, 'A', 'card.md'), 'utf8'), 'new');
-  const list = await tools.list_backups({ kind: 'file', path: 'A/card.md' });
-  assert.equal(list.backups[0].id, w.backupId);
+  assert.equal(w.created, false);
+  assert.equal('backupId' in w, false);
+  assert.equal(fs.readFileSync(path.join(cardsRoot, 'A', 'card.md'), 'utf8'), 'new');
   const created = await tools.write_file({ path: 'A/world_book/n.md', content: 'n' });
-  assert.equal(created.created, true); assert.equal(created.backupId, null);
+  assert.equal(created.created, true);
 });
 
 test('paths stay inside shared root; internal dirs and project folders are protected', async t => {
@@ -58,20 +58,21 @@ test('paths stay inside shared root; internal dirs and project folders are prote
   assert.ok(!listed.entries.some(e => e.path.includes('.card-forge') || e.path.startsWith('backups')));
 });
 
-test('apply_patch keeps CRLF, needs unique match; delete moves to backup and restore brings it back', async t => {
+test('apply_patch keeps CRLF, needs unique match; move and delete check baseHash directly', async t => {
   const { tools, cardsRoot } = fixture(t);
   const file = path.join(cardsRoot, 'A', 'card.md');
   let { hash } = await tools.read_file({ path: 'A/card.md' });
   await rejects(tools.apply_patch({ path: 'A/card.md', baseHash: hash, edits: [{ oldText: 'line', newText: 'x' }] }), 'PATCH_NOT_UNIQUE');
   const p = await tools.apply_patch({ path: 'A/card.md', baseHash: hash, edits: [{ oldText: 'line1\nline2', newText: 'L1\nL2' }] });
   assert.equal(fs.readFileSync(file, 'utf8'), 'L1\r\nL2\r\n');
-  const del = await tools.delete({ path: 'A/card.md', baseHash: p.hash });
-  assert.equal(fs.existsSync(file), false);
-  const back = await tools.restore_backup({ kind: 'file', backupId: del.backupId });
-  assert.equal(fs.readFileSync(file, 'utf8'), 'L1\r\nL2\r\n'); assert.equal(back.hash, p.hash);
   await tools.create_dir({ path: 'A/world_book/地点' });
   const mv = await tools.move({ from: 'A/card.md', to: 'A/world_book/地点/c.md', baseHash: p.hash });
-  assert.ok(mv.backupId); assert.ok(fs.existsSync(path.join(cardsRoot, 'A', 'world_book', '地点', 'c.md')));
+  assert.deepEqual(mv, { from: 'A/card.md', to: 'A/world_book/地点/c.md' });
+  const movedFile = path.join(cardsRoot, 'A', 'world_book', '地点', 'c.md');
+  assert.ok(fs.existsSync(movedFile));
+  const del = await tools.delete({ path: 'A/world_book/地点/c.md', baseHash: p.hash });
+  assert.deepEqual(del, { path: 'A/world_book/地点/c.md', deleted: true });
+  assert.equal(fs.existsSync(movedFile), false);
 });
 
 test('search, file_info and validate tools', async t => {
@@ -87,21 +88,21 @@ test('search, file_info and validate tools', async t => {
   await rejects(tools.validate_card({ projectId: 'Z' }), 'PROJECT_NOT_FOUND');
 });
 
-test('card tools always force backup and only disassemble the open card', async t => {
+test('card tools only disassemble the open card and sync_now delegates to service', async t => {
   const { tools, service, calls } = fixture(t);
   await rejects(tools.disassemble_card({}), 'NO_ACTIVE_CARD');
-  service.state.activeCardFile = 'A.png'; service.state.autoBackupBeforeOverwrite = false;
+  service.state.activeCardFile = 'A.png';
   const dis = await tools.disassemble_card({ overwrite: true });
   assert.equal(dis.roundTrip.ok, true);
   assert.ok(Array.isArray(dis.next_actions));
   const syn = await tools.sync_now({ projectId: 'A' });
   assert.ok(Array.isArray(syn.next_actions));
   assert.equal('assemble_card' in tools, false);
-  assert.deepEqual(calls.map(c => [c.action, c.skipBackup]), [['attach', false], ['sync', false]]);
+  assert.equal('list_backups' in tools, false);
+  assert.equal('restore_backup' in tools, false);
+  assert.deepEqual(calls.map(c => c.action), ['attach', 'sync']);
   assert.equal(calls[0].cardFile, 'A.png');
-  const preview = await tools.restore_backup({ kind: 'card', projectId: 'A', backupId: 'b1' });
-  assert.equal(preview.step, 'preview');
-  await rejects(tools.restore_backup({ kind: 'card', projectId: 'A', backupId: 'b1', previewId: 'p' }), 'CONFIRMATION_REQUIRED');
+  assert.equal(calls[0].overwrite, true);
 });
 
 test('writes to the same card wait for that card queue', async t => {

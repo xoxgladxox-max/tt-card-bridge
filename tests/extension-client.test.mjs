@@ -54,7 +54,7 @@ test('one authenticated HTTP client serves control, status and job polling', asy
 
 test('service errors retain code and details instead of becoming success', async () => {
     const client = httpClient(async () => Response.json({ ok: false, error: { code: 'STALE_PREVIEW', message: '已变化', details: { projectId: 'p' } } }, { status: 409 }));
-    await assert.rejects(client.control('resolve'), error => error.code === 'STALE_PREVIEW' && error.details.projectId === 'p');
+    await assert.rejects(client.control('connect'), error => error.code === 'STALE_PREVIEW' && error.details.projectId === 'p');
     await assert.rejects(client.startSync(), { code: 'STALE_PREVIEW' });
 });
 
@@ -188,18 +188,21 @@ test('execution failure is reported with the matching job and consumer', async (
 async function mutationFixture(options = {}) {
     const png = new Uint8Array([137, 80, 78, 71, 4, 1]);
     let world = options.world ?? { entries: { 0: { uid: 0, content: 'base' } } };
+    const worldNames = new Set(options.worldNames ?? ['book', 'taken']);
     const calls = [], writes = [];
     const context = {
+        characters: options.characters ?? [],
+        getCharacters: async () => {},
         getRequestHeaders: () => ({ 'Content-Type': 'application/json', 'X-CSRF-Token': 'test-only' }),
         loadWorldInfo: async () => options.workingWorld ?? world,
-        saveWorldInfo: async (_name, value, immediately) => { assert.equal(immediately, true); writes.push('world'); if (options.failWorld) throw new Error('world save failed'); world = value; },
+        saveWorldInfo: async (name, value, immediately) => { assert.equal(immediately, true); writes.push('world'); if (options.failWorld) throw new Error('world save failed'); worldNames.add(name); world = value; },
         convertCharacterBook: book => ({ entries: Object.fromEntries(book.entries.map(e => [e.uid, e])) }),
         updateWorldInfoList: async () => {}, reloadWorldInfoEditor: async () => {},
     };
     const fetchImpl = async (url, init) => {
         calls.push({ url, init });
         if (url.startsWith('/characters/')) return new Response(png, { status: options.pngStatus ?? 200 });
-        if (url === '/api/settings/get') return Response.json(options.invalidWorldList ? {} : { world_names: options.worldNames ?? ['book', 'taken'] });
+        if (url === '/api/settings/get') return Response.json(options.invalidWorldList ? {} : { world_names: [...worldNames] });
         if (url === '/api/worldinfo/get') {
             const name = JSON.parse(init.body).name;
             return name === 'taken' ? Response.json({ entries: {} }) : Response.json(world);
@@ -278,16 +281,23 @@ test('world write failure after card write is a failure, not a success receipt',
     assert.deepEqual(f.writes, ['card', 'world']);
 });
 
-test('backup restore uses multipart import then the common world save path', async () => {
-    const f = await mutationFixture();
-    const report = await f.mutations.restore({ id: 'restore', avatar: 'x.png', pngBase64: Buffer.from('backup-png').toString('base64'), worldName: 'book', worldRaw: JSON.stringify({ entries: { 0: { uid: 0, content: 'restored' } } }), expected: f.expected });
-    assert.equal(report.restored, true); assert.equal(report.mode, 'import');
+test('create imports PNG with preserved_name, creates new world book, and refuses existing card or world names', async () => {
+    const f = await mutationFixture({ worldNames: [] });
+    const report = await f.mutations.create({ id: 'new-1', op: 'create', avatar: 'x.png', pngBase64: Buffer.from('new-png').toString('base64'), worldName: 'fresh-book', book: { entries: [{ uid: 0, content: 'new world' }] } });
+    assert.equal(report.created, true);
+    assert.equal(report.avatar, 'x.png');
     assert.deepEqual(f.writes, ['import', 'world']);
+    const clashCard = await mutationFixture({ characters: [{ avatar: 'X.png' }], worldNames: [] });
+    await assert.rejects(clashCard.mutations.create({ id: 'new-2', op: 'create', avatar: 'x.png', pngBase64: Buffer.from('new-png').toString('base64') }), /已经有「x.png」/);
+    assert.deepEqual(clashCard.writes, []);
+    const clashWorld = await mutationFixture({ worldNames: ['taken'] });
+    await assert.rejects(clashWorld.mutations.create({ id: 'new-3', op: 'create', avatar: 'x.png', pngBase64: Buffer.from('new-png').toString('base64'), worldName: 'taken' }), /已经有世界书「taken」/);
+    assert.deepEqual(clashWorld.writes, []);
 });
 
-test('failed import does not overwrite the world or report restore success', async () => {
-    const f = await mutationFixture({ failImport: true });
-    await assert.rejects(f.mutations.restore({ id: 'restore', avatar: 'x.png', pngBase64: Buffer.from('backup-png').toString('base64'), worldName: 'book', worldRaw: JSON.stringify({ entries: {} }), expected: f.expected }), /备份导入失败/);
+test('failed import does not create the world or report create success', async () => {
+    const f = await mutationFixture({ failImport: true, worldNames: [] });
+    await assert.rejects(f.mutations.create({ id: 'new-fail', op: 'create', avatar: 'x.png', pngBase64: Buffer.from('new-png').toString('base64'), worldName: 'fresh-book', book: { entries: [] } }), /建卡失败/);
     assert.deepEqual(f.writes, ['import']);
 });
 

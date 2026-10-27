@@ -178,7 +178,7 @@ const consumer = createJobConsumer({ client, execute: async (kind, job) => {
     if (!tt()?.api?.skill) throw new Error('当前宿主不支持技能任务。');
     return runSkillJob(job);
   }
-  if (job.op === 'restore') return mutations.restore(job);
+  if (job.op === 'create') return mutations.create(job);
   if (job.op === 'rename') return runRenameJob(job);
   if (job.op) throw new Error(`不支持的卡片任务：${job.op}`);
   return job.worldName && !job.card ? mutations.runWorld(job) : mutations.runCard(job);

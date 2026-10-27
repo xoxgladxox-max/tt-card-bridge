@@ -1,15 +1,14 @@
 // 给 TT Agent 用的 MCP 接口（Streamable HTTP，只回 JSON，不开 SSE）。
 // 所有路径都限定在工作区目录 cardsRoot 内；Agent 没有改目录、执行命令的工具。
-// 写入规则：已有文件必须带 baseHash（读文件时拿到的），对不上就拒绝；覆盖、删除、移动前一律先备份
-// （不看「覆盖写入前自动备份」开关）；同一张卡的写入和后台同步共用一条队列，不会交错。
+// 写入规则：已有文件必须带 baseHash（读文件时拿到的），对不上就拒绝；不再备份（作者决定 2026-10-27）。
+// 同一张卡的写入和后台同步共用一条队列，不会交错。
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { contained, digest, fail, atomicJson, readJson, copyTree } from './safety.mjs';
+import { contained, digest, fail } from './safety.mjs';
 import { BACKUPS_DIR } from './projects.mjs';
 
 export const MCP_PROTOCOL_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
-const FILE_BACKUPS = 'files';
 const MAX_READ_BYTES = 2 * 1024 * 1024;
 const TEXT_EXT = new Set(['.md', '.txt', '.json', '.yaml', '.yml', '.js', '.mjs', '.html', '.css', '.csv']);
 
@@ -26,11 +25,10 @@ const abs = (root, rel) => rel ? contained(root, rel) : path.resolve(root);
 function assertWritable(rel) {
   const parts = rel.split('/');
   if (parts.some(p => p.startsWith('.'))) fail('FORBIDDEN_PATH', '不能写点开头的内部文件或目录（如 .card-forge）', 403);
-  if (parts[0].toLowerCase() === BACKUPS_DIR) fail('FORBIDDEN_PATH', 'backups/ 由后台管理，不能直接写；恢复请用 restore_backup', 403);
+  if (parts[0].toLowerCase() === BACKUPS_DIR) fail('FORBIDDEN_PATH', 'backups/ 是旧版留下的备份，不能写', 403);
 }
 const lockKey = rel => { const parts = rel.split('/'); return parts.length > 1 ? parts[0].toLowerCase() : null; };
 const fileHash = file => digest(fs.readFileSync(file));
-const stamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, '').replace('T', '-');
 
 // ---------- 工具定义 ----------
 const str = (description) => ({ type: 'string', description });
@@ -38,7 +36,6 @@ const obj = (properties, required = []) => ({ type: 'object', properties, requir
 const PATH = str('工作区目录内的相对路径，用 / 分隔，如「示例卡/world_book/地点/城门.md」（可先调 list_files 或 search_files 查找）');
 const HASH = str('先调 read_file 或 file_info 拿到的 hash；修改、删除、移动已有文件时必须原样传回，对不上说明文件已被改过');
 const PROJECT = str('卡工程名，即工作区目录下的卡文件夹名（可先调 status 从 projects[].id 获取）');
-const BACKUP_ID = str('先调 list_backups 从返回的 backups[].id 获取');
 export const MCP_ERROR_CODES = {
   BASE_HASH_REQUIRED: '目标文件已存在但未传 baseHash：先调 read_file 或 file_info 拿到最新 hash 再写',
   HASH_MISMATCH: '目标文件在你读取后被改动过：重新调 read_file 读取最新内容与 hash 后再改',
@@ -47,8 +44,8 @@ export const MCP_ERROR_CODES = {
   PROJECT_REQUIRED: '缺少 projectId：先调 status 查看 projects[].id',
   PROJECT_NOT_FOUND: '工作区目录下不存在该卡文件夹：先调 status 查看有效 projects[].id，或调 disassemble_card 拆出当前卡',
   NO_ACTIVE_CARD: '酒馆当前未打开角色卡：请作者先在酒馆里打开目标角色卡',
-  ATTACH_CONFLICT: '同名卡工程文件夹已存在：确认需重拆时传 overwrite:true（覆盖前会自动备份）',
-  CONFIRMATION_REQUIRED: '整卡恢复第二步需传 previewId 与 confirm:true',
+  ATTACH_CONFLICT: '同名卡工程文件夹已存在：确认需重拆时传 overwrite:true（不进卡的文件会保留）',
+  CONFLICT: '断开期间两边都改了：请作者在面板里选「以本地为准覆盖」或「新建卡」',
 };
 export const MCP_INSTRUCTIONS = [
   '卡工程工作区目录的受控文件与同步工具。所有路径均相对工作区目录，用 / 分隔。',
@@ -62,17 +59,15 @@ export const TOOLS = [
   { name: 'read_file', description: '读取文本文件，返回内容、总行数 totalLines 和整份文件的 hash。大文件或超 2MB 文件可用 startLine/endLine（从 1 开始，含首尾）分段读，返回的 hash 仍可直接作为写入时的 baseHash。', inputSchema: obj({ path: PATH, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 } }, ['path']), annotations: { readOnlyHint: true } },
   { name: 'search_files', description: '在文本文件里按关键字（或正则）搜索，返回文件、行号和该行内容。', inputSchema: obj({ query: str('要找的文字'), path: str('只在这个目录下找，留空为全部'), regex: { type: 'boolean' }, maxResults: { type: 'integer', minimum: 1, maximum: 500 } }, ['query']), annotations: { readOnlyHint: true } },
   { name: 'file_info', description: '查看文件或目录是否存在、类型、大小、修改时间；文件还会给出 hash（可直接作为 baseHash）。', inputSchema: obj({ path: PATH }, ['path']), annotations: { readOnlyHint: true } },
-  { name: 'write_file', description: '写入整份文件。新建时不带 baseHash；覆盖已有文件时必须带 read_file/file_info 返回的 baseHash，覆盖前自动备份。', inputSchema: obj({ path: PATH, content: str('完整文件内容'), baseHash: HASH }, ['path', 'content']) },
-  { name: 'apply_patch', description: '按原文精确替换。每处 oldText 必须在文件里恰好出现一次。必须带 read_file 返回的 baseHash，改前自动备份。', inputSchema: obj({ path: PATH, baseHash: HASH, edits: { type: 'array', minItems: 1, items: obj({ oldText: str('要替换的原文（必须与文件完全一致）'), newText: str('替换后的文字') }, ['oldText', 'newText']) } }, ['path', 'baseHash', 'edits']) },
+  { name: 'write_file', description: '写入整份文件。新建时不带 baseHash；覆盖已有文件时必须带 read_file/file_info 返回的 baseHash。', inputSchema: obj({ path: PATH, content: str('完整文件内容'), baseHash: HASH }, ['path', 'content']) },
+  { name: 'apply_patch', description: '按原文精确替换。每处 oldText 必须在文件里恰好出现一次。必须带 read_file 返回的 baseHash。', inputSchema: obj({ path: PATH, baseHash: HASH, edits: { type: 'array', minItems: 1, items: obj({ oldText: str('要替换的原文（必须与文件完全一致）'), newText: str('替换后的文字') }, ['oldText', 'newText']) } }, ['path', 'baseHash', 'edits']) },
   { name: 'create_dir', description: '新建目录（可多层）。', inputSchema: obj({ path: PATH }, ['path']) },
   { name: 'move', description: '移动或改名。目标不能已存在。移动文件要带 baseHash；不能移动卡工程文件夹本身。', inputSchema: obj({ from: PATH, to: PATH, baseHash: HASH }, ['from', 'to']) },
-  { name: 'delete', description: '删除文件或子目录：实际是移入备份，可用 restore_backup 找回。删文件要带 baseHash；不能删卡工程文件夹本身。', inputSchema: obj({ path: PATH, baseHash: HASH }, ['path']) },
-  { name: 'disassemble_card', description: '把酒馆里当前打开的那张卡拆到工作区目录（只能拆当前打开的卡），并返回往返比对摘要 roundTrip。文件夹已存在时需 overwrite:true，覆盖前自动备份。', inputSchema: obj({ overwrite: { type: 'boolean' } }) },
-  { name: 'sync_now', description: '立即对一张已接入酒馆的卡做一次双向同步（projectId 从 status 的 projects[].id 获取），写前自动备份。两边都改过时返回冲突，不会自动覆盖。', inputSchema: obj({ projectId: PROJECT }, ['projectId']) },
+  { name: 'delete', description: '直接删除文件或子目录，删了不能找回。删文件要带 baseHash；不能删卡工程文件夹本身。', inputSchema: obj({ path: PATH, baseHash: HASH }, ['path']) },
+  { name: 'disassemble_card', description: '把酒馆里当前打开的那张卡拆到工作区目录（只能拆当前打开的卡），并返回往返比对摘要 roundTrip。文件夹已存在时需 overwrite:true（记录、候选等不进卡的文件会保留）。', inputSchema: obj({ overwrite: { type: 'boolean' } }) },
+  { name: 'sync_now', description: '立即对一张已连到酒馆的卡做一次双向同步（projectId 从 status 的 projects[].id 获取）。连着时文件一保存就会自动同步，一般不用调。两边都改过时返回冲突，不会自动覆盖。', inputSchema: obj({ projectId: PROJECT }, ['projectId']) },
   { name: 'validate_card', description: '按 card-forge 协议检查卡工程（projectId 从 status 的 projects[].id 获取），列出错误和警告，不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
   { name: 'validate_worldbook', description: '只检查卡工程 world_book/ 里的条目（projectId 从 status 的 projects[].id 获取），不写任何文件。', inputSchema: obj({ projectId: PROJECT }, ['projectId']), annotations: { readOnlyHint: true } },
-  { name: 'list_backups', description: '列出备份：kind=file 为文件改动前的备份（可按 path 过滤）；kind=card 为整卡同步前的备份（需 projectId）。返回的 backups[].id 可传给 restore_backup。', inputSchema: obj({ kind: { type: 'string', enum: ['file', 'card'] }, path: str('只看这个路径的文件备份'), projectId: PROJECT, limit: { type: 'integer', minimum: 1, maximum: 200 } }), annotations: { readOnlyHint: true } },
-  { name: 'restore_backup', description: '恢复备份。kind=file：把文件放回原位，原位已有文件时要带它当前的 baseHash，并先备份当前文件。kind=card：第一次调用只返回预览和 previewId，带 previewId 与 confirm:true 再调用才写进酒馆。', inputSchema: obj({ kind: { type: 'string', enum: ['file', 'card'] }, backupId: BACKUP_ID, baseHash: HASH, projectId: PROJECT, previewId: str('kind=card 第二步用（第一步返回）'), confirm: { type: 'boolean' } }, ['kind', 'backupId']) },
 ];
 
 // ---------- 工具实现 ----------
@@ -84,22 +79,6 @@ export function createMcpTools(service) {
     const key = keys.length === 1 ? keys[0] : null;
     return service.queue.run({ action: `mcp:${label}`, projectId: key }, fn, key);
   };
-  const backupsRoot = () => path.join(root(), BACKUPS_DIR, FILE_BACKUPS);
-  // 改动前备份：copy 用于覆盖，move 用于删除/移动（同一个盘内直接改名，不复制大目录）
-  function backupPath(rel, op, mode = 'copy') {
-    const src = abs(root(), rel);
-    if (!fs.existsSync(src)) return null;
-    const id = `${stamp()}-${crypto.randomBytes(3).toString('hex')}`;
-    const dir = path.join(backupsRoot(), id);
-    fs.mkdirSync(dir, { recursive: true });
-    const isDir = fs.statSync(src).isDirectory();
-    const dst = path.join(dir, 'content');
-    if (mode === 'move') fs.renameSync(src, dst);
-    else if (isDir) copyTree(src, dst);
-    else fs.copyFileSync(src, dst);
-    atomicJson(path.join(dir, 'meta.json'), { id, path: rel, op, isDir, hash: isDir ? null : fileHash(dst), at: new Date().toISOString() });
-    return id;
-  }
   function checkHash(file, rel, baseHash, required) {
     if (!fs.existsSync(file)) return;
     if (fs.statSync(file).isDirectory()) return;
@@ -146,7 +125,6 @@ export function createMcpTools(service) {
     };
   }
   const control = body => service.control(body);
-  const forcedBackup = { skipBackup: false };
 
   return {
     async status() {
@@ -216,9 +194,8 @@ export function createMcpTools(service) {
         const existed = fs.existsSync(file);
         if (!existed && baseHash) fail('HASH_MISMATCH', `「${rel}」不存在（可能已被移走），不能按旧 hash 写`, 409);
         checkHash(file, rel, baseHash, true);
-        const backupId = existed ? backupPath(rel, 'write_file') : null;
         writeAtomic(file, content);
-        return { path: rel, created: !existed, hash: fileHash(file), backupId };
+        return { path: rel, created: !existed, hash: fileHash(file) };
       });
     },
     async apply_patch({ path: p, baseHash, edits }) {
@@ -240,9 +217,8 @@ export function createMcpTools(service) {
           if (count !== 1) fail('PATCH_NOT_UNIQUE', `第 ${i + 1} 处原文在文件里出现 ${count} 次，必须恰好 1 次`, 409);
           text = text.replace(oldText, () => newText);
         });
-        const backupId = backupPath(rel, 'apply_patch');
         writeAtomic(file, crlf ? text.replaceAll('\n', '\r\n') : text);
-        return { path: rel, hash: fileHash(file), backupId, applied: edits.length };
+        return { path: rel, hash: fileHash(file), applied: edits.length };
       });
     },
     async create_dir({ path: p }) {
@@ -260,10 +236,9 @@ export function createMcpTools(service) {
         if (!fs.existsSync(src)) fail('NOT_FOUND', `不存在：${a}`, 404);
         if (fs.existsSync(dst)) fail('ALREADY_EXISTS', `目标已存在：${b}`, 409);
         checkHash(src, a, baseHash, true);
-        const backupId = backupPath(a, 'move');
         fs.mkdirSync(path.dirname(dst), { recursive: true });
         fs.renameSync(src, dst);
-        return { from: a, to: b, backupId };
+        return { from: a, to: b };
       });
     },
     async delete({ path: p, baseHash }) {
@@ -273,14 +248,14 @@ export function createMcpTools(service) {
         const file = abs(root(), rel);
         if (!fs.existsSync(file)) fail('NOT_FOUND', `不存在：${rel}`, 404);
         checkHash(file, rel, baseHash, true);
-        const backupId = backupPath(rel, 'delete', 'move');
-        return { path: rel, deleted: true, backupId };
+        fs.rmSync(file, { recursive: true, force: true });
+        return { path: rel, deleted: true };
       });
     },
     async disassemble_card({ overwrite = false } = {}) {
       const cardFile = service.state.activeCardFile;
       if (!cardFile) fail('NO_ACTIVE_CARD', '酒馆里没有打开角色卡（或是群聊）；请作者先在酒馆里打开要拆的卡', 409);
-      const res = await control({ action: 'attach', cardFile, overwrite: Boolean(overwrite), ...forcedBackup });
+      const res = await control({ action: 'attach', cardFile, overwrite: Boolean(overwrite) });
       return {
         ...res,
         roundTrip: res?.roundTrip ?? { ok: true, diffCount: 0, diffs: [] },
@@ -289,7 +264,7 @@ export function createMcpTools(service) {
     },
     async sync_now({ projectId }) {
       projectDir(projectId);
-      const res = await control({ action: 'sync', projectId: projectId.trim(), ...forcedBackup });
+      const res = await control({ action: 'sync', projectId: projectId.trim() });
       return {
         ...res,
         next_actions: ['status', 'validate_card'],
@@ -297,41 +272,6 @@ export function createMcpTools(service) {
     },
     validate_card: ({ projectId }) => validate(projectId, false),
     validate_worldbook: ({ projectId }) => validate(projectId, true),
-    async list_backups({ kind = 'file', path: p, projectId, limit = 50 } = {}) {
-      if (kind === 'card') {
-        projectDir(projectId);
-        const res = await control({ action: 'backups', projectId: projectId.trim() });
-        return { kind, projectId, backups: (res.backups ?? []).slice(0, limit) };
-      }
-      const dir = backupsRoot(), filter = p ? normRel(p) : null;
-      const list = fs.existsSync(dir) ? fs.readdirSync(dir).sort().reverse().map(id => readJson(path.join(dir, id, 'meta.json'))).filter(Boolean) : [];
-      return { kind, backups: list.filter(m => !filter || m.path === filter || m.path.startsWith(`${filter}/`)).slice(0, limit) };
-    },
-    async restore_backup({ kind, backupId, baseHash, projectId, previewId, confirm }) {
-      if (kind === 'card') {
-        projectDir(projectId);
-        if (!previewId) return { step: 'preview', ...(await control({ action: 'restorePreview', projectId: projectId.trim(), backupId })), next: '确认无误后带 previewId 和 confirm:true 再调用一次' };
-        if (confirm !== true) fail('CONFIRMATION_REQUIRED', '写进酒馆前需要 confirm:true', 400);
-        return control({ action: 'restore', projectId: projectId.trim(), previewId, confirm: true, ...forcedBackup });
-      }
-      if (typeof backupId !== 'string' || !/^[\w-]+$/.test(backupId)) fail('INVALID_BACKUP', 'backupId 无效', 400);
-      const dir = path.join(backupsRoot(), backupId), meta = readJson(path.join(dir, 'meta.json'));
-      if (!meta) fail('BACKUP_NOT_FOUND', `没有这个备份：${backupId}`, 404);
-      const rel = normRel(meta.path); assertWritable(rel);
-      return withLock([rel], 'restore_backup', async () => {
-        const target = abs(root(), rel), src = path.join(dir, 'content');
-        if (!fs.existsSync(src)) fail('BACKUP_NOT_FOUND', '备份内容已不在', 404);
-        let replacedBackupId = null;
-        if (fs.existsSync(target)) {
-          if (meta.isDir || fs.statSync(target).isDirectory()) fail('ALREADY_EXISTS', `原位置已有目录「${rel}」，请先移走`, 409);
-          checkHash(target, rel, baseHash, true);
-          replacedBackupId = backupPath(rel, 'restore_backup');
-        }
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-        if (meta.isDir) copyTree(src, target); else fs.copyFileSync(src, target);
-        return { path: rel, restoredFrom: backupId, replacedBackupId, ...(meta.isDir ? {} : { hash: fileHash(target) }) };
-      });
-    },
   };
 }
 

@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { contained, segment, readJson } from './safety.mjs';
 
-export const occupiesTarget = record => record.attached || !!record.pendingOperation || record.restoreRequired;
+export const occupiesTarget = record => record.attached || !!record.pendingOperation;
 export const reservedTargets = record => occupiesTarget(record) ? [...new Set([record.cardFile, record.pendingOperation?.targetCardFile].filter(Boolean).map(x => x.toLowerCase()))] : [];
 export const targetOccupied = (record, target) => reservedTargets(record).includes(target.toLowerCase());
-// 工作区布局：cards/<卡名>/ 一张卡一个文件夹；cards/backups/ 放备份，不是工程
+// 工作区布局：cards/<卡名>/ 一张卡一个文件夹；cards/backups/ 是旧版备份目录，不是工程
 export const BACKUPS_DIR = 'backups';
 export const INTERNAL_SUBDIRS = new Set([
   'backups', 'dist', 'world_book', 'message', 'regex', 'scripts', 'note',
@@ -50,7 +50,6 @@ export function projectRecordFromDir(dir, id = segment(path.basename(dir))) {
     detached: binding.detached ?? false,
     paused: binding.paused ?? false,
     projectName: binding.projectName ?? (targetKind === 'card' && cardFile ? cardFile.slice(0, -4) : folderName),
-    restoreRequired: binding.restoreRequired ?? false,
     pendingOperation,
   };
 }

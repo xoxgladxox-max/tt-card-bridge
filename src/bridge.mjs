@@ -14,7 +14,8 @@ export class JobQueue {
       if (job.avatar !== undefined) segment(job.avatar, '卡文件名');
       if (job.worldName !== undefined && job.worldName !== null) segment(job.worldName, '世界书名');
       if (job.card?.data?.extensions?.world) segment(job.card.data.extensions.world, '世界书名');
-      if (job.op !== undefined && !['rename', 'restore'].includes(job.op)) fail('INVALID_JOB', '未知卡任务', 400);
+      if (job.op !== undefined && !['rename', 'create'].includes(job.op)) fail('INVALID_JOB', '未知卡任务', 400);
+      if (job.op === 'create' && (typeof job.pngBase64 !== 'string' || !job.pngBase64 || !/\.png$/i.test(job.avatar ?? ''))) fail('INVALID_JOB', '建卡任务缺少卡文件名或 PNG', 400);
       if (job.op === 'rename') segment(job.newName, '新卡名');
     }
     if (this.jobs.some(x => x.job.id === job.id) || this.results.has(job.id)) fail('DUPLICATE_JOB', '任务 id 已存在');

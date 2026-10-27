@@ -5,12 +5,8 @@ const statusLabels = {
     clean: '两侧一致', unchecked: '尚未检查', differences: '存在差异', error: '处理失败',
     paused: '已暂停', unattached: '未接入', pending: '仍有未同步内容',
     operationPending: '写入结果待确认', reviewRequired: '需要人工复核',
-    restoreRequired: '恢复未完成', bindingConflict: '存在重复绑定', waitingForStableFiles: '等待文件稳定',
-    cardMissing: '连着的卡已不在酒馆里', needsConfirm: '有改动待确认',
+    bindingConflict: '存在重复绑定', cardMissing: '连着的卡已不在酒馆里', needsReconnect: '已断开，等你选择',
 };
-const suggestLabels = { project: '建议用工程（只有工程改了）', tavern: '建议用酒馆（只有酒馆改了）' };
-const timeText = iso => iso ? new Date(iso).toLocaleString() : '未知';
-const differenceLabels = { project: '工程有修改', tavern: '酒馆有修改', conflict: '双方修改冲突', added: '酒馆新增或工程缺少', removed: '工程新增或酒馆缺少' };
 function element(tag, content, className) {
     const node = document.createElement(tag);
     if (content !== undefined) node.textContent = text(content);
@@ -30,18 +26,6 @@ function button(label, run) {
     node.addEventListener('click', run);
     return node;
 }
-function labeled(label, control) {
-    const node = element('label', undefined, 'ttcb-field');
-    node.append(element('small', label), control);
-    return node;
-}
-function readOnlyText(value) {
-    const area = element('textarea');
-    area.readOnly = true;
-    area.rows = 5;
-    area.value = value === null ? '（不存在）' : text(value);
-    return area;
-}
 function formatLogLine(item) {
     if (typeof item === 'string') return item.length > 260 ? `${item.slice(0, 260)}…` : item;
     if (!item || typeof item !== 'object') return text(item);
@@ -50,7 +34,7 @@ function formatLogLine(item) {
     const body = item.error?.message
         ? `失败(${item.error.code ?? 'ERROR'}): ${item.error.message}`
         : item.status
-            ? `${statusLabels[item.status] ?? item.status}${item.changed ? '（已同步）' : ''}${item.backupId ? ` [备份 ${item.backupId}]` : ''}`
+            ? `${statusLabels[item.status] ?? item.status}${item.changed ? '（已同步）' : ''}`
             : item.cardFile
                 ? item.cardFile
                 : '';
@@ -78,11 +62,8 @@ export function mountSettings({ client, getContext }) {
             <small data-role="status" role="status" class="flex1">正在读取后台状态…</small>
             ${icon('toggle', 'fa-power-off', '启动同步', '启动本机后台并开启自动同步；暂停不打断正在进行的写入')}
             ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取状态，并把当前打开的卡告诉后台')}
-            ${icon('import-workspace', 'fa-file-import', '导入酒馆', '选一个有 card.md 的卡工程文件夹，合成后像「从文件导入角色」一样在酒馆里新建一张卡；不连接、不同步工程')}
-            <input type="file" data-role="import-folder" webkitdirectory hidden>
           </div>
           <small class="ttcb-dim">后台 <code data-role="connection">—</code> · 工作区 <code data-role="cards-root">—</code></small>
-          <small data-role="backup-off-note" class="ttcb-warning" hidden>已关闭覆盖前备份，覆盖后无法找回旧版本。</small>
           <hr>
           <small data-role="current-card"></small>
           <div data-role="card-extras">
@@ -90,20 +71,17 @@ export function mountSettings({ client, getContext }) {
             <div data-role="extras"></div>
           </div>
           <div class="flex-container">
-            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '把当前卡和它绑定的世界书拆到 工作区\\\\<卡名>\\\\；同名文件夹已存在时先列清单再问是否覆盖')}
-            ${icon('rebind', 'fa-link', '改连到当前卡', '把工程改为连接当前打开的卡（删卡重导后用）；要改条目编号时先列清单确认')}
+            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '第一次把酒馆里的这张卡变成本地工程：拆到 工作区\\\\<卡名>\\\\，拆完自动连上')}
+            ${icon('connect', 'fa-link', '连接', '把「工作区」里选中的卡工程连到酒馆：没进过酒馆的新建一张卡；连过的两边一致就直接连上，不一致让你选「以本地为准覆盖」或「新建卡」')}
           </div>
           <div data-role="msg" class="ttcb-msg">
             <div data-role="error" role="alert" class="ttcb-warning" hidden></div>
             <div data-role="diff"></div>
-            <div data-role="backups"></div>
-            <div data-role="restore"></div>
           </div>
           <details class="ttcb-fold" data-fold="workspace">
             <summary>工作区</summary>
             <div class="flex-container alignitemscenter">
               <select data-role="projects" class="flex1" aria-label="工作区里的卡工程"></select>
-              ${icon('backups', 'fa-clock-rotate-left', '备份', '查看所选工程的备份并预览恢复')}
             </div>
             <small data-role="project-status" class="ttcb-dim"></small>
             <div class="flex-container alignitemscenter">
@@ -115,23 +93,14 @@ export function mountSettings({ client, getContext }) {
             <summary>设置</summary>
             <div class="flex-container alignitemscenter">
               <input data-role="cards-root-input" type="text" class="flex1" placeholder="工作区目录，例如 D:\\cards" aria-label="工作区目录" autocomplete="off">
-              ${icon('set-cards-root', 'fa-folder-open', '切换', '拆卡、同步、合成和 Agent 读写都在这个目录里')}
-            </div>
-            <div class="flex-container alignitemscenter">
-              <label class="checkbox_label" title="关闭时确认一次，之后所有覆盖直接执行"><input data-role="backup-before-overwrite" type="checkbox" checked><small>覆盖前备份，每张卡保留</small></label>
-              <input data-role="backup-keep" type="number" min="0" max="1000" step="1" value="5" class="text_pole ttcb-num" aria-label="每张卡保留的备份份数" title="改完自动保存。0 = 全部保留。只清理同步前的自动快照">
-              <small>份（0 = 全留）</small>
-            </div>
-            <div class="flex-container alignitemscenter">
-              <input data-role="backup-dir" type="text" class="flex1" placeholder="备份位置（留空 = 工作区\\backups\\<卡名>\\）" aria-label="备份位置" autocomplete="off">
-              ${icon('set-backup-dir', 'fa-floppy-disk', '保存', '保存备份位置')}
+              ${icon('set-cards-root', 'fa-folder-open', '切换', '拆卡、连接、同步和 Agent 读写都在这个目录里')}
             </div>
           </details>
           <details class="ttcb-fold" data-fold="tools">
             <summary>工具</summary>
             <div class="flex-container">
               ${icon('skills-status', 'fa-magnifying-glass', '检查技能', '对照原件与 LimCode TEST、Claude Code、~/.agents/skills、酒馆里的技能和 Agent')}
-              ${icon('skills-deploy', 'fa-wand-magic-sparkles', '同步技能', '存档当前版本后，把技能和 Agent 同步到各处（按备份设置先备份）')}
+              ${icon('skills-deploy', 'fa-wand-magic-sparkles', '同步技能', '把技能和 Agent 同步到各处')}
               ${icon('logs-toggle', 'fa-list', '日志', '显示或隐藏后台日志')}
               ${icon('diagnostics', 'fa-copy', '复制诊断', '复制诊断信息（含本机路径和卡名，不含令牌）')}
             </div>
@@ -156,21 +125,6 @@ export function mountSettings({ client, getContext }) {
     const selectedProject = () => state?.assembleProjects?.find(project => project.id === find('projects').value) ?? state?.projects?.find(project => project.id === find('projects').value);
     // ② 用：下拉没选中时，工作区目录里只有一张卡就用那张
     const assembleTarget = () => selectedProject() || (state?.assembleProjects?.length === 1 ? state.assembleProjects[0] : null);
-    // 优先用酒馆自己的弹窗；没有时退回 window.confirm
-    async function askConfirm(message, okText = '确定', cancelText = '取消') {
-        const ctx = getContext();
-        if (typeof ctx?.callGenericPopup === 'function' && ctx.POPUP_TYPE) {
-            const pre = document.createElement('div');
-            pre.style.whiteSpace = 'pre-wrap';
-            pre.style.textAlign = 'left';
-            pre.textContent = message;
-            const result = await ctx.callGenericPopup(pre, ctx.POPUP_TYPE.CONFIRM, '', { okButton: okText, cancelButton: cancelText });
-            return result === true || result === 1 || result === ctx.POPUP_RESULT?.AFFIRMATIVE;
-        }
-        return typeof window.confirm === 'function' ? window.confirm(message) : false;
-    }
-    // ② 的进度与报错就写在 ② 下面，不只写在面板顶部
-    const importNote = (text, warn = false) => find('diff').replaceChildren(element('p', text, warn ? 'ttcb-warning' : undefined));
     const currentCard = () => {
         const ctx = getContext();
         return ctx.groupId ? null : ctx.characters?.[ctx.characterId];
@@ -190,7 +144,7 @@ export function mountSettings({ client, getContext }) {
         find('error').hidden = !lastError;
     }
     function clearPreviews() {
-        for (const role of ['diff', 'backups', 'restore']) find(role).replaceChildren();
+        find('diff').replaceChildren();
         conflictShownFor = '';
     }
     // 拆前扫描：变量框架提示 + 正则/脚本/变量清单（勾上＝拆成文件，不勾＝留在 card.md）
@@ -218,51 +172,67 @@ export function mountSettings({ client, getContext }) {
         }
     }
     const keptExtras = () => [...find('extras').querySelectorAll('input[data-extra-key]')].filter(cb => !cb.checked).map(cb => cb.dataset.extraKey);
-    // 自动同步遇到两边都改过的内容时，列出正文冲突让作者选；结构/槽位差异只列简短摘要，不塞满屏文本框
-    async function showConflictIfAny() {
+    // 断开后重连两边不一致、连着时两边都改了、原来的卡已不在：同步停下，只给两个选择（作者决定 2026-10-27）
+    function showReconnectIfAny() {
         const p = selectedProject();
-        // 自动轮发现改动：列清单等作者确认；同一版本只展开一次
-        if (p?.status === 'needsConfirm') {
-            const sig = `${p.id}|needsConfirm|${p.lastResult?.diff?.revision ?? ''}`;
-            if (conflictShownFor === sig || busy) return;
-            conflictShownFor = sig;
-            try { showDiff(await client.control('diff', { projectId: p.id }), p.id); } catch (error) { showError(error); }
-            return;
-        }
-        const err = p?.lastResult?.error;
-        const code = err?.code;
-        if (!p || !['CONFLICT', 'TAVERN_CHANGED', 'UNSUPPORTED_DIFFERENCE'].includes(code)) return;
-        const sig = `${p.id}|${code}|${err.message}`;
+        const waiting = p && (p.status === 'needsReconnect' || p.status === 'cardMissing');
+        if (!waiting) { if (conflictShownFor) { find('diff').replaceChildren(); conflictShownFor = ''; } return; }
+        const r = p.lastResult ?? {};
+        const onlyNew = p.status === 'cardMissing' || r.onlyNew === true;
+        const sig = `${p.id}|${onlyNew}|${r.diff?.revision ?? ''}`;
         if (conflictShownFor === sig || busy) return;
         conflictShownFor = sig;
-        if (code === 'UNSUPPORTED_DIFFERENCE') {
-            const box = find('diff');
-            box.replaceChildren();
-            const issues = err?.details?.issues ?? [];
-            const shown = issues.slice(0, 8);
-            for (const issue of shown) box.append(element('p', issue.message, 'ttcb-warning'));
-            if (issues.length > shown.length) {
-                box.append(element('small', `另有 ${issues.length - shown.length} 项结构或槽位差异未展开（整体以酒馆为准用「拆解当前卡」，以工程为准用工作区里的「导入酒馆」）。`));
-            }
-            return;
+        const box = find('diff');
+        box.replaceChildren();
+        const items = [...(r.diff?.changedSlots ?? []).map(s => s.label ?? s.key), ...(r.diff?.issues ?? []).map(i => i.message)];
+        box.append(element('p', onlyNew
+            ? `「${p.id}」原来连的「${p.missingCardFile ?? p.cardFile}」已不在酒馆里，同步已停下。只能新建卡：`
+            : `「${p.id}」和酒馆里的「${p.cardFile}」不一致${items.length ? `（${items.length} 项）` : ''}，同步已停下。选一个：`, 'ttcb-warning'));
+        if (items.length) {
+            const fold = element('details');
+            fold.append(element('summary', '看是哪些'), element('small', [...new Set(items)].slice(0, 40).join('、')));
+            box.append(fold);
         }
-        try { showDiff(await client.control('diff', { projectId: p.id }), p.id); } catch (error) { showError(error); }
+        const row = element('div', undefined, 'flex-container');
+        if (!onlyNew) row.append(serviceButton('以本地为准覆盖', async () => {
+            if (!confirmAction(`把本地工程「${p.id}」整个写进酒馆里的「${p.cardFile}」和它的世界书。\n断开期间在酒馆里做的改动不保留；聊天记录不动。继续？`)) return;
+            const res = await client.control('reconnectOverwrite', { projectId: p.id });
+            done(`已以本地为准覆盖「${res.project?.cardFile ?? p.cardFile}」，已连上，之后实时同步。`);
+        }));
+        row.append(serviceButton('新建卡', async () => {
+            if (!confirmAction(`按本地工程「${p.id}」新建一张卡和一本世界书（重名会起新名字，不连旧的同名世界书），之后连到新卡。\n${onlyNew ? '' : `旧卡「${p.cardFile}」留在酒馆里不动。`}继续？`)) return;
+            const res = await client.control('reconnectNew', { projectId: p.id });
+            await openCard(res.cardFile);
+            done(`已新建「${res.cardFile}」${res.worldName ? `和世界书「${res.worldName}」` : ''}，已连上，之后实时同步。`);
+        }));
+        box.append(row);
+    }
+    const done = message => { find('diff').replaceChildren(element('p', message)); conflictShownFor = ''; };
+    // 连接或新建后让酒馆打开那张卡：后台只同步酒馆里打开的卡
+    async function openCard(cardFile) {
+        if (!cardFile) return;
+        await getContext().getCharacters?.();
+        const now = getContext();
+        if (now.groupId) throw new Error(`已连上「${cardFile}」。酒馆里开着群聊，退出群聊后打开这张卡，同步才会开始。`);
+        const idx = now.characters.findIndex(c => c.avatar === cardFile);
+        if (idx >= 0 && now.characters[now.characterId]?.avatar !== cardFile) await now.selectCharacterById(idx);
+        await checkCardFollow({ force: true });
     }
     function renderControls() {
         for (const control of root.querySelectorAll('button')) control.disabled = busy && control.dataset.action !== 'logs-toggle';
         action('toggle').disabled = busy;
         setLabel(action('toggle'), state?.paused === false ? '暂停同步' : '启动同步');
         action('set-cards-root').disabled = busy || !state;
-        action('set-backup-dir').disabled = busy || !state;
         action('skills-status').disabled = busy || !state;
         action('skills-deploy').disabled = busy || !state;
         action('attach').disabled = busy || !state || !currentCard();
         action('attach-world').disabled = busy || !state || !find('worlds').value;
         const project = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
-        action('import-workspace').disabled = busy || !state;
-        action('backups').disabled = busy || !project?.attached;
         const card = currentCard();
-        action('rebind').disabled = busy || !state || !project || project.targetKind === 'world' || !card?.avatar || project.cardFile?.toLowerCase() === card.avatar.toLowerCase();
+        // 已经连着、酒馆也正打开它时不用再连
+        const liveHere = project && card?.avatar && project.cardFile?.toLowerCase() === card.avatar.toLowerCase() && ['clean', 'pending'].includes(project.status);
+        action('connect').disabled = busy || !state || !project || project.targetKind === 'world' || !!liveHere;
+        setLabel(action('connect'), project && project.targetKind !== 'world' ? `连接「${project.id}」` : '连接');
         const errOf = p => p?.status === 'error' && p.lastResult?.error?.message ? `：${p.lastResult.error.message}` : '';
         find('project-status').textContent = project
             ? `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? (statusLabels[project.status] ?? project.status ?? '状态未知') : '还没进酒馆'}${errOf(project)}${project.pendingOperation ? ` · 未决任务 ${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`
@@ -272,28 +242,19 @@ export function mountSettings({ client, getContext }) {
             ? ` · 后台还在跟「${state.activeCardFile ?? '没有卡'}」，点「刷新」`
             : '';
         const cardMatched = card && (state?.projects ?? []).find(p => p.cardFile && p.cardFile.toLowerCase() === card.avatar?.toLowerCase());
-        // 当前卡没有工程连着、但有工程原来连的卡已被删：多半是删卡重导，指向改连，不引导去重新拆解
-        const orphans = cardMatched ? [] : (state?.projects ?? []).filter(p => p.status === 'cardMissing');
         const detail = cardMatched
             ? `工程「${cardMatched.id}」 · ${statusLabels[cardMatched.status] ?? cardMatched.status ?? '状态未知'}${errOf(cardMatched)}`
-            : orphans.length
-                ? `没有工程连着；工程${orphans.map(p => `「${p.id}」`).join('、')}原来的卡已不在，可「改连到当前卡」`
-                : '还没拆到工作区';
+            : '还没有本地工程（第一次用点「拆解当前卡」）';
         find('current-card').textContent = card
             ? `当前卡：${card.name} · ${detail}${followGap}`
             : '先在酒馆打开一张角色卡（群聊不支持）。';
-        // 只显示当前用得上的主按钮：没拆过才显示拆解和拆前清单；有可改连的工程才显示改连
+        // 当前卡这一行只有两个按钮：没拆过才显示拆解和拆前清单；「连接」作用于「工作区」里选中的工程
         const unmatched = !!card && !cardMatched;
         action('attach').hidden = !unmatched;
         find('card-extras').hidden = !unmatched;
-        action('rebind').hidden = !unmatched || action('rebind').disabled;
+        action('connect').hidden = action('connect').disabled && !busy;
         // Preview-specific controls also need a live service, not just a loaded extension.
         for (const node of root.querySelectorAll('[data-service-action]')) node.disabled = busy || !state;
-    }
-    // 备份按常驻设置执行：关闭时已在开关处确认过一次，这里不再逐次询问，也不替后台决定跳过备份
-    function overwriteBackupOptions() {
-        const backupDir = find('backup-dir').value.trim();
-        return backupDir ? { backupDir } : {};
     }
     function syncSelectionToCurrentCard() {
         const select = find('projects');
@@ -303,7 +264,7 @@ export function mountSettings({ client, getContext }) {
         // ② 的下拉只跟工作区目录走：当前卡刚好在里面就选中它，不在就保持原来的选择，不清空
         const pool = state?.assembleProjects ?? state?.projects ?? [];
         const matched = pool.find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase())
-            // 当前卡没有工程、只有一个工程原来的卡已不在：预选它，「改连到当前卡」就是改它
+            // 当前卡没有工程、只有一个工程原来的卡已不在：预选它，好直接「新建卡」
             ?? (() => { const o = pool.filter(p => p.status === 'cardMissing'); return o.length === 1 ? o[0] : null; })();
         if (matched && select.value !== matched.id) {
             select.value = matched.id;
@@ -314,12 +275,6 @@ export function mountSettings({ client, getContext }) {
     function renderState() {
         find('cards-root').textContent = state?.cardsRoot ?? '尚未连接';
         if (state?.cardsRoot && !find('cards-root-input').value) find('cards-root-input').value = state.cardsRoot;
-        if (state?.backupDir && !find('backup-dir').value) find('backup-dir').value = state.backupDir;
-        if (state && typeof state.autoBackupBeforeOverwrite === 'boolean') {
-            find('backup-before-overwrite').checked = state.autoBackupBeforeOverwrite;
-            find('backup-off-note').hidden = state.autoBackupBeforeOverwrite;
-        }
-        if (state && Number.isInteger(state.backupKeep) && document.activeElement !== find('backup-keep')) find('backup-keep').value = String(state.backupKeep);
         const pool = state?.assembleProjects ?? state?.projects ?? [];
         const signature = JSON.stringify(pool.map(p => [p.id, p.name, p.cardFile, p.attached]));
         if (signature !== projectSignature) {
@@ -333,7 +288,7 @@ export function mountSettings({ client, getContext }) {
                 select.append(opt);
             } else {
                 for (const project of pool) {
-                    const option = element('option', `${project.name ?? project.cardFile ?? project.id}${project.attached ? '' : '（未接入）'}`);
+                    const option = element('option', `${project.name ?? project.cardFile ?? project.id}${project.attached ? '' : '（还没连到酒馆）'}`);
                     option.value = project.id;
                     select.append(option);
                 }
@@ -366,7 +321,7 @@ export function mountSettings({ client, getContext }) {
             find('logs').textContent = (state?.logs ?? []).slice(-50).map(formatLogLine).join('\n') || '（暂无日志）';
         }
         renderControls();
-        if (state) { scanCurrentCard(); showConflictIfAny(); }
+        if (state) { scanCurrentCard(); showReconnectIfAny(); }
     }
     // 告诉后台酒馆当前打开的是哪张卡、哪本世界书。
     // 后台确认收到后才记下；失败时清掉记录，下一秒的定时检查会重试。force：手动刷新等场合不管是否变化都重新告诉一次
@@ -400,7 +355,7 @@ export function mountSettings({ client, getContext }) {
             connection = await client.connectionInfo();
             find('connection').textContent = connection.base;
             state = await client.status();
-            find('status').textContent = `已连接 · ${state.paused ? '自动同步已暂停' : '自动同步中'}${state.currentTask ? ' · 正在处理' : ''}`;
+            find('status').textContent = `已连接 · ${state.paused ? '自动同步已暂停' : '实时同步中'}${state.currentTask ? ' · 正在处理' : ''}`;
             if (!actionFailed && (lastError.startsWith('本机后台未连接') || lastError.startsWith('缺少有效的本机连接配置'))) showError('');
         } catch (error) {
             state = null;
@@ -423,133 +378,16 @@ export function mountSettings({ client, getContext }) {
         node.dataset.serviceAction = '';
         return node;
     };
-    function requireProject() {
-        const project = selectedProject();
-        if (!project) throw new Error('请先选择已接入的工程。');
-        return project;
-    }
-    function showDiff(diff, projectId) {
-        const box = find('diff');
-        box.replaceChildren();
-        const changed = (diff.slots ?? []).filter(slot => slot.kind !== 'equal');
-        // 同一原因只占一行（如「18 条条目设置不同：comment」），点开看是哪几条；正文不同的条目仍逐条列在下面
-        const groups = new Map();
-        for (const issue of diff.issues ?? []) {
-            const group = groups.get(issue.message) ?? { message: issue.message, labels: [] };
-            if (issue.key) group.labels.push(diff.slots?.find(slot => slot.key === issue.key)?.label ?? issue.key);
-            groups.set(issue.message, group);
-        }
-        box.append(element('p', diff.clean ? '工程与酒馆一致。' : `有 ${changed.length + groups.size} 项改动待确认，确认前两边都不写。`, undefined));
-        for (const group of groups.values()) {
-            if (group.labels.length < 2) { box.append(element('p', group.labels.length ? `${group.message}（${group.labels[0]}）` : group.message, 'ttcb-warning')); continue; }
-            const fold = element('details');
-            fold.append(element('summary', `${group.labels.length} 条${group.message}`, 'ttcb-warning'), element('small', group.labels.join('、')));
-            box.append(fold);
-        }
-        const tavernTime = key => key.startsWith('entry:') && diff.times?.world ? diff.times.world : diff.times?.card;
-        const choices = [];
-        for (const slot of changed) {
-            const row = element('div', undefined, 'ttcb-slot');
-            row.append(element('b', `${slot.label ?? slot.key} · ${differenceLabels[slot.kind] ?? slot.kind}${slot.suggest ? ` · ${suggestLabels[slot.suggest]}` : slot.kind === 'conflict' ? ' · 两边都改了，必须选' : ''}`));
-            if (diff.times) row.append(element('small', `工程文件：${timeText(diff.times.local?.[slot.key])}${slot.relPath ? `（${slot.relPath}）` : ''} · 酒馆：${timeText(tavernTime(slot.key))}`));
-            const sides = element('div', undefined, 'ttcb-sides');
-            sides.append(labeled('工程', readOnlyText(slot.node)), labeled('酒馆', readOnlyText(slot.tavern)));
-            row.append(sides);
-            if (slot.canResolve) {
-                const select = element('select');
-                for (const [value, label] of [['', '请选择保留内容'], ['project', '使用工程正文'], ['tavern', '使用酒馆正文'], ['manual', '手动填写正文']]) {
-                    const option = element('option', label); option.value = value; select.append(option);
-                }
-                // 只是预选建议，仍要作者点确认才写
-                if (slot.suggest) select.value = slot.suggest;
-                const manual = element('textarea'); manual.rows = 6; manual.hidden = true;
-                select.addEventListener('change', () => { manual.hidden = select.value !== 'manual'; });
-                row.append(labeled('处理方式', select), manual);
-                choices.push({ key: slot.key, label: slot.label ?? slot.key, select, manual });
-            } else if (slot.suggest) row.append(element('p', `此项是条目或开场白的新增，确认后按建议写入（${slot.suggest === 'project' ? '推到酒馆' : '写回工程'}）。`));
-            else row.append(element('p', '此项涉及设置或结构，不能在正文选边中处理；可用下方「整卡以文件为准」，或「拆解当前卡」覆盖。', 'ttcb-warning'));
-            box.append(row);
-        }
-        if (diff.clean) return;
-        const backupNote = () => find('backup-before-overwrite').checked ? '写前先备份。' : '已关闭覆盖前备份，写后无法找回。';
-        const listOf = items => `${items.slice(0, 20).join('\n')}${items.length > 20 ? `\n…共 ${items.length} 项` : ''}`;
-        const done = message => { box.replaceChildren(element('p', message)); conflictShownFor = ''; };
-        const actionsRow = element('div', undefined, 'flex-container');
-        actionsRow.append(serviceButton('确认写入所选', async () => {
-            if (choices.some(c => !c.select.value)) throw new Error('请为每一项选择保留内容。');
-            const sideText = { project: '用工程', tavern: '用酒馆', manual: '手写' };
-            const lines = [...choices.map(c => `· ${c.label}：${sideText[c.select.value]}`), ...changed.filter(s => !s.canResolve && s.suggest).map(s => `· ${s.label}：${s.suggest === 'project' ? '推到酒馆' : '写回工程'}`)];
-            if (!confirmAction(`将写入以下 ${lines.length} 项：\n${listOf(lines)}\n\n${backupNote()}继续？`)) return;
-            await client.control('resolve', {
-                projectId, previewId: diff.previewId,
-                choices: choices.map(c => ({ key: c.key, source: c.select.value, ...(c.select.value === 'manual' ? { text: c.manual.value } : {}) })),
-                ...overwriteBackupOptions(),
-            });
-            done('已按所选写入，并复核一致。');
-        }));
-        const whole = (side, label) => serviceButton(label, async () => {
-            const items = changed.map(s => `· ${s.label ?? s.key}（${differenceLabels[s.kind] ?? s.kind}）`).concat((diff.issues ?? []).map(i => `· ${i.message}`));
-            const what = side === 'project' ? '以下各项都改成工程文件的版本，并把整张卡推到酒馆' : '以下各项都改成酒馆的版本，写回工程文件';
-            if (!confirmAction(`${label}：${what}。\n${listOf(items)}\n\n${backupNote()}继续？`)) return;
-            await client.control('resolve', { projectId, previewId: diff.previewId, wholeCard: side, ...overwriteBackupOptions() });
-            done(`已${label}，并复核一致。`);
-        });
-        actionsRow.append(whole('project', '整卡以文件为准'), whole('tavern', '整卡以酒馆为准'));
-        box.append(actionsRow);
-    }
-    async function showBackups(projectId) {
-        const result = await client.control('backups', { projectId });
-        const box = find('backups'); box.replaceChildren(); find('restore').replaceChildren();
-        if (!result.backups?.length) { box.append(element('p', '没有备份。')); return; }
-        for (const backup of result.backups) {
-            const row = element('div', undefined, 'ttcb-backup');
-            row.append(element('span', `${backup.createdAt ?? backup.id} ${backup.reason ?? ''}`));
-            if (backup.supported) row.append(serviceButton('预览恢复', async () => {
-                const preview = await client.control('restorePreview', { projectId, backupId: backup.id });
-                const target = find('restore'); target.replaceChildren();
-                target.append(element('p', '这是导入覆盖恢复的预览。执行前按备份设置先备份，恢复后此卡保持暂停。'));
-                target.append(element('p', preview.notice ?? '导入会重编码PNG，并可能改写创建日期、聊天关联和收藏；不是原字节精确恢复。', 'ttcb-warning'));
-                target.append(element('pre', JSON.stringify(preview, null, 2)));
-                if (!preview.canRestore) {
-                    target.append(element('p', preview.blockedReason ?? '此备份不能自动导入恢复；请查看原因。', 'ttcb-warning'));
-                    return;
-                }
-                target.append(serviceButton('确认覆盖恢复', async () => {
-                    if (!confirmAction(`确定要用备份「${backup.id}」覆盖恢复当前角色卡与工程吗？`)) return;
-                    const backupOpts = overwriteBackupOptions('恢复历史备份');
-                    await client.control('restore', { projectId, previewId: preview.previewId, confirm: true, ...backupOpts });
-                    clearPreviews();
-                    find('restore').append(element('p', '恢复已完成；此卡仍暂停。先检查差异，再决定是否恢复自动同步。'));
-                }));
-            }));
-            else row.append(element('span', '旧备份或不完整备份：不支持自动恢复。', 'ttcb-warning'));
-            box.append(row);
-        }
-    }
-    async function runManualSync(direction) {
-        const label = direction === 'push' ? '手动推送到酒馆' : direction === 'pull' ? '手动从酒馆拉取' : '立即双向同步';
-        const backupOpts = overwriteBackupOptions(label);
-        const result = await client.control('sync', { projectId: requireProject().id, direction, ...backupOpts });
-        const failures = result.results?.filter(r => r.error || r.status === 'conflict' || r.status === 'blocked') ?? [];
-        if (failures.length) throw new Error(failures.map(r => typeof r.error === 'object' ? r.error.message : r.error ?? r.status).join('\n'));
-        clearPreviews();
-    }
     async function attachWithConflictPrompt(actionName, payload, label) {
         try {
             await client.control(actionName, payload);
         } catch (error) {
             if (error?.code !== 'ATTACH_CONFLICT' || !String(error.message).includes('同名工程目录')) throw error;
-            const autoBackup = find('backup-before-overwrite').checked;
             const d = error.details ?? {};
             const kept = (d.keepGroups ?? []).map(g => g.path.endsWith('/') ? `${g.path}（${g.files} 个文件）` : g.path).join('、');
             const plan = `\n\n会按酒馆当前内容重新生成：卡内容文件 ${d.replaceCount ?? '?'} 个（card.md、字段、message\\、world_book\\、regex\\、scripts\\）。\n原样保留：${kept || '没有其他文件'}。\n条目文件名按酒馆里的条目标题重新生成，可能和你原来的文件名不同。`;
-            const ok = confirmAction(
-                autoBackup
-                    ? `本地已存在同名工程目录（${label}）。${plan}\n\n是否先把旧目录整个备份，再覆盖接入？`
-                    : `本地已存在同名工程目录（${label}），当前已关闭覆盖前备份。${plan}\n\n被重新生成的卡内容文件无法找回。是否覆盖接入？`,
-            );
-            if (!ok) throw error;
-            await client.control(actionName, { ...payload, overwrite: true, ...overwriteBackupOptions() });
+            if (!confirmAction(`本地已存在同名工程目录（${label}）。${plan}\n\n被重新生成的卡内容文件不会备份。是否覆盖？`)) throw error;
+            await client.control(actionName, { ...payload, overwrite: true });
         }
     }
     const actions = {
@@ -560,7 +398,20 @@ export function mountSettings({ client, getContext }) {
             find('status').textContent = '正在启动并连接同步后台…';
             return client.startSync();
         },
-        diff: async () => { const p = requireProject(); showDiff(await client.control('diff', { projectId: p.id }), p.id); },
+        connect: async () => {
+            const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
+            if (!p) throw new Error('先在「工作区」里选中要连接的卡工程。');
+            const ask = p.cardFile
+                ? `把卡工程「${p.id}」连到酒馆里的「${p.cardFile}」？\n两边一致就直接连上；不一致会让你选「以本地为准覆盖」或「新建卡」。`
+                : `卡工程「${p.id}」还没进过酒馆。按本地工程新建一张卡和一本世界书（重名会起新名字），之后实时同步。继续？`;
+            if (!confirmAction(ask)) return;
+            if (state?.paused !== false) state = await client.control('resume');
+            const res = await client.control('connect', { projectId: p.id });
+            if (res.status === 'needsReconnect') { conflictShownFor = ''; return; }
+            const cardFile = res.cardFile ?? res.project?.cardFile;
+            await openCard(cardFile);
+            done(`已把「${p.id}」连到「${cardFile}」，之后实时同步。`);
+        },
         attach: async () => {
             const card = currentCard();
             if (!card) throw new Error('先在酒馆选择一张角色卡。');
@@ -578,103 +429,6 @@ export function mountSettings({ client, getContext }) {
             if (state?.paused !== false) state = await client.control('resume');
             find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」，已开启实时双向同步。`));
         },
-        // 导入酒馆：和酒馆「从文件导入角色」一样，选文件夹 → 合成 → 用酒馆的导入接口新建一张卡（重名由酒馆加编号）。
-        // 每次都是独立操作：不看同步记录、不连接工程、不同步
-        'import-workspace': async () => {
-            const picker = find('import-folder');
-            picker.value = '';
-            const picked = await new Promise(resolve => {
-                picker.addEventListener('change', () => resolve([...picker.files]), { once: true });
-                picker.click();
-            });
-            if (!picked.length) return;
-            const rel = file => (file.webkitRelativePath || file.name).replaceAll('\\', '/');
-            // 选到上一层时：只有一个子文件夹里有 card.md 就用它
-            let roots = picked.map(rel).filter(p => p.endsWith('/card.md')).map(p => p.slice(0, -'card.md'.length));
-            roots = roots.filter(r => !roots.some(o => o !== r && r.startsWith(o)));
-            const top = rel(picked[0]).split('/')[0] + '/';
-            const base = roots.includes(top) ? top : roots.length === 1 ? roots[0] : top;
-            if (!roots.includes(base) && roots.length > 1) throw new Error(`选的文件夹里有 ${roots.length} 个卡工程：${roots.map(r => r.slice(0, -1)).join('、')}。请直接选其中一个。`);
-            const name = base.slice(0, -1).split('/').pop();
-            const skip = new Set(['backups', 'dist', '记录', '候选', '待归位', 'note', 'handoff', 'node_modules']);
-            const inside = picked.filter(file => rel(file).startsWith(base)).map(file => ({ file, path: rel(file).slice(base.length) }))
-                .filter(({ path }) => !path.split('/').some((part, i, all) => part.startsWith('.') || (i < all.length - 1 && skip.has(part))));
-            const files = {};
-            for (const { file, path } of inside) {
-                if (/\.(md|json|html|js)$/i.test(path)) files[path] = await file.text();
-            }
-            const toBase64 = async blob => { const bytes = new Uint8Array(await blob.arrayBuffer()); let s = ''; for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
-            const cover = inside.find(({ path }) => path === 'character.png')?.file ?? await fetch('img/ai4.png').then(r => r.ok ? r.blob() : null);
-            if (!cover) throw new Error('卡工程里没有 character.png，也取不到酒馆默认头像。');
-            files['character.png'] = await toBase64(cover);
-            importNote(`正在合成「${name}」…`);
-            const built = await client.control('buildCard', { files: { name, paths: inside.map(x => x.path), files } });
-            const bytes = Uint8Array.from(atob(built.pngBase64), c => c.charCodeAt(0));
-            const ctx = getContext();
-            const form = new FormData();
-            form.append('avatar', new File([bytes], built.fileName, { type: 'image/png' }));
-            form.append('file_type', 'png');
-            if (ctx.name1) form.append('user_name', ctx.name1);
-            const headers = new Headers(ctx.getRequestHeaders());
-            headers.delete('Content-Type');
-            const response = await fetch('/api/characters/import', { method: 'POST', headers, body: form, cache: 'no-cache' });
-            const data = response.ok ? await response.json() : null;
-            if (!data || data.error || data.file_name === undefined) throw new Error(`酒馆导入失败：${response.status} ${data?.error ?? response.statusText}`);
-            await ctx.getCharacters?.();
-            // 酒馆导入只把世界书留在卡里，要作者另点「导入卡内世界书」才生成。这里按酒馆同一做法直接生成并连上：
-            // 每次导入都新建一本，重名时加「 (n)」，不覆盖已有的世界书
-            const st = getContext(), avatar = `${data.file_name}.png`;
-            const chid = st.characters.findIndex(c => c.avatar === avatar);
-            const book = chid >= 0 ? st.characters[chid]?.data?.character_book : null;
-            let worldNote = "卡里没有世界书。";
-            if (book?.entries?.length) {
-                if (typeof st.convertCharacterBook !== "function" || typeof st.saveWorldInfo !== "function" || typeof st.writeExtensionField !== "function") throw new Error(`已导入新卡「${data.file_name}」，但当前酒馆没有生成世界书的接口；请在角色面板「更多…」里点「导入卡内世界书」。`);
-                const names = new Set((st.getWorldInfoNames?.() ?? []).map(n => n.toLowerCase()));
-                const base = book.name || st.characters[chid].data?.extensions?.world || `${st.characters[chid].name}的世界书`;
-                let worldName = base;
-                for (let i = 1; names.has(worldName.toLowerCase()); i++) worldName = `${base} (${i})`;
-                await st.saveWorldInfo(worldName, st.convertCharacterBook(book), true);
-                await st.writeExtensionField(chid, "world", worldName);
-                await st.updateWorldInfoList?.();
-                worldNote = `世界书「${worldName}」（${book.entries.length} 条）已生成并连到这张卡。`;
-            }
-            importNote(`已导入为新卡「${data.file_name}」。${worldNote}`);
-        },
-        rebind: async () => {
-            const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
-            const card = currentCard();
-            if (!p) throw new Error('先在下拉框选中要改连的卡工程。');
-            if (!card?.avatar) throw new Error('先在酒馆打开要连接的那张卡。');
-            const ok = confirmAction(`把卡工程「${p.id}」改为连接酒馆当前打开的「${card.name}」（${card.avatar}）？\n\n不写卡。世界书条目按标题和正文配对；要改本地条目编号时会先列清单给你确认。两边一致就直接开始实时同步；不一致会列出差异让你选。`);
-            if (!ok) return;
-            const payload = { projectId: p.id, cardFile: card.avatar, choices: {} };
-            let res = await client.control('rebind', payload);
-            if (res.needsChoice) {
-                for (const a of res.plan.ambiguous) {
-                    const same = await askConfirm(`条目「${a.title || '（无标题）'}」（${a.relPath}）：本地和酒馆标题相同，正文不同。\n\n「同一条」：改成酒馆的编号 ${a.remoteUid}，正文差异稍后逐项选边。\n「当两条」：各自保留，稍后显示为本地新增和酒馆新增。`, '同一条', '当两条');
-                    payload.choices[a.relPath] = same ? 'pair' : 'separate';
-                }
-                res = await client.control('rebind', payload);
-            }
-            if (res.needsConfirm) {
-                const pl = res.plan;
-                const lines = pl.changes.slice(0, 15).map(c => `· ${c.title || c.relPath}：${c.from} → ${c.to}${c.reason === 'reassigned' ? '（配不上，旧编号被占，换空号）' : ''}`);
-                const more = pl.changes.length > 15 ? `\n…共 ${pl.changes.length} 条` : '';
-                const autoBackup = find('backup-before-overwrite').checked;
-                const ok2 = confirmAction(`配对结果：本地 ${pl.localCount} 条、酒馆 ${pl.remoteCount} 条，配上 ${pl.pairedCount} 条；只在本地 ${pl.localOnly.length} 条，只在酒馆 ${pl.remoteOnly.length} 条。\n\n要改下列本地文件开头的 tavern.id（正文不动）：\n${lines.join('\n')}${more}\n\n${autoBackup ? '改前先备份这些文件。' : '已关闭覆盖前备份，改后无法找回。'}继续？`);
-                if (!ok2) { importNote('已取消改连，没有改任何文件。'); return; }
-                res = await client.control('rebind', { ...payload, confirm: true, planId: pl.planId, ...overwriteBackupOptions() });
-            }
-            if (state?.paused !== false) state = await client.control('resume');
-            await checkCardFollow({ force: true });
-            const renum = res.renumbered?.changed?.length ? `改了 ${res.renumbered.changed.length} 个条目的编号${res.renumbered.backupId ? `（备份：${res.renumbered.backupId}）` : ''}，` : '';
-            if (res.clean) {
-                find('diff').replaceChildren(element('p', `已把「${p.id}」改连到「${card.avatar}」，${renum}两侧一致，已开启实时双向同步。`));
-            } else {
-                showDiff(await client.control('diff', { projectId: p.id }), p.id);
-                importNote(`已把「${p.id}」改连到「${card.avatar}」，${renum}但两边内容不同：请在下方逐项选择以哪边为准；结构差异大时可改用「拆解当前卡」或「导入酒馆」整体覆盖。`, true);
-            }
-        },
         'set-cards-root': async () => {
             const cardsRoot = find('cards-root-input').value.trim();
             if (!cardsRoot) throw new Error('请填写要切换的工作区目录路径。');
@@ -683,12 +437,6 @@ export function mountSettings({ client, getContext }) {
             clearPreviews();
             find('diff').replaceChildren(element('p', `已切换工作区目录至：${res.cardsRoot}`));
         },
-        'set-backup-dir': async () => {
-            const backupDir = find('backup-dir').value.trim();
-            const res = await client.control('setBackupDir', { backupDir });
-            find('backup-dir').value = res.backupDir;
-            find('diff').replaceChildren(element('p', res.backupDir ? `已保存自定义备份位置：${res.backupDir}` : '已恢复默认备份位置（工作区目录\\backups\\<卡名>\\）。'));
-        },
         'skills-status': async () => {
             const res = await client.control('skillsStatus');
             const out = find('skills-output');
@@ -696,13 +444,11 @@ export function mountSettings({ client, getContext }) {
             out.hidden = false;
         },
         'skills-deploy': async () => {
-            const backupOpts = overwriteBackupOptions('同步技能与 Agent');
-            const res = await client.control('skillsDeploy', backupOpts);
+            const res = await client.control('skillsDeploy');
             const out = find('skills-output');
             out.textContent = res.summary ?? JSON.stringify(res, null, 2);
             out.hidden = false;
         },
-        backups: () => showBackups(requireProject().id),
     };
     for (const [name, fn] of Object.entries(actions)) action(name)?.addEventListener('click', () => run(fn));
     // Local view actions do not call the service or immediately overwrite the status line via refresh().
@@ -733,38 +479,6 @@ export function mountSettings({ client, getContext }) {
     });
     find('projects').addEventListener('change', () => { clearPreviews(); renderControls(); });
     find('worlds').addEventListener('change', renderControls);
-    // 份数改完就保存（失焦或回车触发 change），不另设按钮
-    find('backup-keep').addEventListener('change', () => run(async () => {
-        const keep = Number(find('backup-keep').value);
-        if (!Number.isInteger(keep) || keep < 0 || keep > 1000) {
-            find('backup-keep').value = String(state?.backupKeep ?? 5);
-            throw new Error('份数要填 0～1000 的整数（0 = 全部保留）。');
-        }
-        const res = await client.control('setBackupKeep', { keep });
-        find('backup-keep').value = String(res.backupKeep);
-        find('status').textContent = res.backupKeep ? `已保存：每张卡保留最近 ${res.backupKeep} 份自动快照。` : '已保存：全部保留备份。';
-    }));
-    find('backup-before-overwrite').addEventListener('change', async () => {
-        const enabled = find('backup-before-overwrite').checked;
-        if (!enabled) {
-            const ok = confirmAction('关闭「每次覆盖写入前自动备份」后，后续覆盖操作将直接覆盖目标数据，一旦出错无法找回，数据丢失责任由本人自行承担。\n\n确定要关闭常驻自动备份吗？');
-            if (!ok) {
-                find('backup-before-overwrite').checked = true;
-                return;
-            }
-        }
-        if (state) {
-            try {
-                const res = await client.control('setAutoBackup', { enabled, acceptDataLossRisk: !enabled });
-                state.autoBackupBeforeOverwrite = res.autoBackupBeforeOverwrite;
-                find('backup-off-note').hidden = res.autoBackupBeforeOverwrite;
-            } catch (error) {
-                find('backup-before-overwrite').checked = !enabled;
-                showError(error);
-            }
-        }
-        renderControls();
-    });
     renderControls();
     return { refresh, checkCardFollow, showError, root, dispose: () => root.remove() };
 }

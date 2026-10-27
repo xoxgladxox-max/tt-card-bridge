@@ -5,12 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { SyncEngine, compareSnapshot } from '../src/sync-engine.mjs';
-import { SyncService } from '../src/sync-service.mjs';
+import { SyncService, normalizeState, DEFAULT_STATE } from '../src/sync-service.mjs';
 import { FileSyncAdapter } from '../src/file-sync-adapter.mjs';
 import { JobQueue, createBridgeServer } from '../src/bridge.mjs';
 import { connection } from '../src/connection.mjs';
 import { slotHash, readCardPng } from '../src/slots.mjs';
-import { atomicJson, contained, hashObject, digest } from '../src/safety.mjs';
+import { atomicJson, contained, hashObject, digest, SerialQueue } from '../src/safety.mjs';
 import { embedChara } from '../src/png.mjs';
 
 const basePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB1sAAAAASUVORK5CYII=', 'base64');
@@ -22,34 +22,35 @@ function tree(dir) {
   walk(''); return out;
 }
 class MemoryAdapter {
-  node = 'base'; remote = 'base'; base = slotHash('base'); writes = 0; pushes = 0; saved = 0; backupsTaken = 0; issues = []; failPush = false;
+  node = 'base'; remote = 'base'; base = slotHash('base'); writes = 0; pushes = 0; saved = 0; issues = []; failPush = false;
   async snapshot() {
     const data = { nodes: { slots: { 'field:description': { value: this.node, label: 'description', relPath: 'index.md' } } }, tavern: { slots: { 'field:description': { value: this.remote, label: 'description' } } }, baseline: this.base === undefined ? null : { slots: { 'field:description': this.base } }, issues: this.issues, expected: { card: slotHash(this.remote), world: null } };
     return { ...data, revision: hashObject(data) };
   }
   async writeBodies(p, s, updates) { for (const u of updates) { this.node = u.value; this.writes++; } }
-  async backup() { this.backupsTaken++; return 'backup'; }
   async push() { this.pushes++; if (this.beforePush) await this.beforePush(); if (this.failPush) throw new Error('fake transport failed'); this.remote = this.node; }
-  async saveBaseline(p, s) { this.saved++; if (this.node === this.remote) this.base = slotHash(this.node); }
+  async saveBaseline() { this.saved++; if (this.node === this.remote) this.base = slotHash(this.node); }
   listCards() { return [{ cardFile: 'A.png', name: 'A' }, { cardFile: 'B.png', name: 'B' }]; }
 }
-function serviceFixture(t, adapter = new MemoryAdapter()) {
+function serviceFixture(t, adapter = new MemoryAdapter(), { debounceMs = 10, fallbackMs = 1000, watch = null } = {}) {
   const root = temp(t), cardsRoot = path.join(root, 'cards'), dir = path.join(cardsRoot, 'A');
   fs.mkdirSync(dir, { recursive: true });
   atomicJson(path.join(dir, '.card-forge', 'mirror.json'), { cardFile: 'A.png', hash: 'old-mirror' });
   atomicJson(path.join(dir, '.card-forge', 'tavern-sync.json'), { cardFile: 'A.png', slots: { 'field:description': slotHash('base') } });
-  const service = new SyncService({ cardsRoot, runtimeRoot: path.join(root, 'runtime'), adapter });
+  const service = new SyncService({ cardsRoot, runtimeRoot: path.join(root, 'runtime'), adapter, debounceMs, fallbackMs, ...(watch ? { watch } : {}) });
+  t.after(() => service.stop());
   return { root, dir, service, adapter };
 }
 
-test('new service paused; legacy baseline retained; check/diff/status are read-only', async t => {
+test('new service paused; legacy baseline retained; check/status are read-only', async t => {
   const { root, service, adapter } = serviceFixture(t);
   adapter.node = 'local'; const before = tree(root);
   assert.equal((await service.status()).paused, true);
   assert.equal((await service.status()).projects[0].attached, true);
   assert.equal((await service.status()).unattachedCards, undefined);
   await assert.rejects(service.control({ action: 'check' }), e => e.code === 'PROJECT_REQUIRED');
-  await service.control({ action: 'check', projectId: 'A' }); await service.control({ action: 'diff', projectId: 'A' });
+  const checked = await service.control({ action: 'check', projectId: 'A' });
+  assert.equal(checked.results[0].diff.clean, false);
   assert.deepEqual(tree(root), before); assert.equal(adapter.writes + adapter.pushes + adapter.saved, 0);
 });
 test('three-way sync pulls remote and pushes local with one comparison', async () => {
@@ -57,14 +58,16 @@ test('three-way sync pulls remote and pushes local with one comparison', async (
   adapter.remote = 'remote'; await engine.run({}); assert.equal(adapter.node, 'remote'); assert.equal(adapter.base, slotHash('remote'));
   adapter.node = 'local'; await engine.run({}); assert.equal(adapter.remote, 'local'); assert.equal(adapter.base, slotHash('local'));
 });
-test('no baseline or two changed sides never silently overwrite', async () => {
+test('no baseline or two changed sides never silently overwrite; replaceRemote overwrites with local', async () => {
   for (const base of [undefined, slotHash('base')]) {
     const a = new MemoryAdapter(); a.base = base; a.node = 'mine'; a.remote = 'theirs';
     await assert.rejects(new SyncEngine(a).run({}), e => e.code === 'CONFLICT');
-    assert.equal(a.writes + a.pushes + a.saved + a.backupsTaken, 0);
+    assert.equal(a.writes + a.pushes + a.saved, 0);
+    await new SyncEngine(a).run({}, { replaceRemote: true });
+    assert.equal(a.remote, 'mine'); assert.equal(a.base, slotHash('mine'));
   }
 });
-test('settings and structural differences explicitly block even force', async () => {
+test('settings and structural differences block normal sync; replaceRemote pushes local as truth', async () => {
   const a = new MemoryAdapter(); a.node = 'mine'; a.issues = [{ kind: 'settings', message: 'different binding' }];
   await assert.rejects(new SyncEngine(a).run({}, { direction: 'push', force: true }), e => e.code === 'UNSUPPORTED_DIFFERENCE');
   assert.equal(a.pushes, 0);
@@ -82,24 +85,16 @@ test('pull does not mark still-local changes as synchronized', async () => {
   const result = await new SyncEngine(a).run({}, { direction: 'pull' });
   assert.equal(result.status, 'pending'); assert.equal(a.base, base); assert.equal(a.remote, 'base');
 });
-test('preview stale check and explicit manual conflict decision', async t => {
-  const { service, adapter } = serviceFixture(t); adapter.node = 'mine'; adapter.remote = 'theirs';
-  let preview = await service.control({ action: 'diff', projectId: 'A' }); adapter.remote = 'newer';
-  await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [{ key: 'field:description', source: 'project' }] }), e => e.code === 'STALE_PREVIEW');
-  assert.equal(adapter.writes + adapter.pushes, 0);
-  preview = await service.control({ action: 'diff', projectId: 'A' });
-  await service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [{ key: 'field:description', source: 'manual', text: 'merged' }] });
-  assert.equal(adapter.node, 'merged'); assert.equal(adapter.remote, 'merged'); assert.equal(adapter.base, slotHash('merged'));
-});
 test('pause lets an in-flight write finish and blocks future automatic work', async t => {
-  const { service, adapter } = serviceFixture(t); adapter.node = 'local';
-  let release, entered; const started = new Promise(r => entered = r); const gate = new Promise(r => release = r);
-  adapter.beforePush = async () => { entered(); await gate; };
+  const { service, adapter } = serviceFixture(t);
   await service.control({ action: 'followCard', cardFile: 'A.png' });
   await service.control({ action: 'resume' });
-  // 写入只在作者确认后发生：确认中的写入不被暂停打断
-  const preview = await service.control({ action: 'diff', projectId: 'A' });
-  const task = service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] });
+  // 先在一致状态下连上（进入 live）
+  assert.equal((await service.batch('sync', undefined, true)).results[0].status, 'clean');
+  let release, entered; const started = new Promise(r => entered = r); const gate = new Promise(r => release = r);
+  adapter.node = 'local';
+  adapter.beforePush = async () => { entered(); await gate; };
+  const task = service.batch('sync', undefined, true);
   await started; await service.control({ action: 'pause' }); assert.equal(adapter.remote, 'base'); release(); await task;
   assert.equal(adapter.remote, 'local'); adapter.node = 'later'; adapter.beforePush = null;
   assert.deepEqual((await service.batch('sync', undefined, true)).results, []); assert.equal(adapter.remote, 'local');
@@ -123,55 +118,45 @@ test('automatic sync touches only the card open in the tavern; no open card mean
   assert.deepEqual((await service.batch('sync', undefined, true)).results, []); assert.equal(adapter.pushes, 0);
   await service.control({ action: 'followCard', cardFile: 'A.png' });
   const result = await service.batch('sync', undefined, true);
-  assert.deepEqual(result.results.map(r => r.projectId), ['A']); assert.equal(result.results[0].status, 'needsConfirm'); assert.equal(adapter.remote, 'base');
+  assert.deepEqual(result.results.map(r => r.projectId), ['A']); assert.equal(result.results[0].status, 'needsReconnect'); assert.equal(adapter.remote, 'base');
 });
-test('automatic round only lists changes; nothing is written until the author confirms', async t => {
+test('reconnect rule: clean connects directly and syncs live; dirty pauses as needsReconnect until reconnectOverwrite or reconnectNew', async t => {
   const { service, adapter } = serviceFixture(t); adapter.node = 'local';
   await service.control({ action: 'followCard', cardFile: 'A.png' }); await service.control({ action: 'resume' });
   for (let i = 0; i < 3; i++) {
     const r = await service.batch('sync', undefined, true);
-    assert.equal(r.results[0].status, 'needsConfirm');
+    assert.equal(r.results[0].status, 'needsReconnect');
     assert.deepEqual(r.results[0].diff.changedSlots.map(s => s.kind), ['project']);
   }
-  assert.equal(adapter.writes + adapter.pushes + adapter.saved + adapter.backupsTaken, 0);
-  assert.equal(service.logs.filter(l => l.action === 'needsConfirm').length, 1);
-  assert.equal((await service.status()).projects[0].status, 'needsConfirm');
-  // 清单给出建议；空 choices = 全部按建议
-  const preview = await service.control({ action: 'diff', projectId: 'A' });
-  assert.equal(preview.slots.find(s => s.key === 'field:description').suggest, 'project');
-  assert.equal(preview.times, null);
-  await service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] });
+  assert.equal(adapter.writes + adapter.pushes + adapter.saved, 0);
+  assert.equal(service.logs.filter(l => l.action === 'needsReconnect').length, 1);
+  assert.equal((await service.status()).projects[0].status, 'needsReconnect');
+  // 选「以本地为准覆盖」后写入并进入持续连着状态（live）
+  await service.control({ action: 'reconnectOverwrite', projectId: 'A' });
   assert.equal(adapter.remote, 'local'); assert.equal(adapter.base, slotHash('local'));
-  const pushes = adapter.pushes; let r = await service.batch('sync', undefined, true);
-  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.pushes, pushes);  // 两边一致后进入持续连着状态：只改一边的自动同步，不再问
-  adapter.node = 'live edit';
+  assert.equal((await service.status()).projects[0].status, 'clean');
+  // 持续连着时只改一边（本地或酒馆）直接自动同步，不再弹窗
+  adapter.node = 'live local';
+  let r = await service.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.remote, 'live local');
+  adapter.remote = 'live tavern';
   r = await service.batch('sync', undefined, true);
-  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.remote, 'live edit');
-  // 断开（暂停）期间的改动：重连后第一轮列清单等确认
-  await service.control({ action: 'pause' }); adapter.remote = 'offline edit'; await service.control({ action: 'resume' });
+  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.node, 'live tavern');
+  // 连着时两边同时改了：停下进入 needsReconnect
+  adapter.node = 'mine'; adapter.remote = 'theirs';
   r = await service.batch('sync', undefined, true);
-  assert.equal(r.results[0].status, 'needsConfirm'); assert.equal(adapter.node, 'live edit');
-  // 后台重启同样算重连
+  assert.equal(r.results[0].status, 'needsReconnect');
+  assert.equal(adapter.node, 'mine'); assert.equal(adapter.remote, 'theirs');
+  await service.control({ action: 'reconnectOverwrite', projectId: 'A' });
+  assert.equal(adapter.remote, 'mine');
+  // 暂停或后台重启算断开：断开期间酒馆改过，重连时即使只有一边改了也必须进入 needsReconnect，不能把断开期间酒馆的改动直接写进本地
+  await service.control({ action: 'pause' }); adapter.remote = 'offline tavern edit'; await service.control({ action: 'resume' });
+  r = await service.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'needsReconnect'); assert.equal(adapter.node, 'mine');
   const restarted = new SyncService({ cardsRoot: service.cardsRoot, runtimeRoot: service.runtimeRoot, adapter });
+  t.after(() => restarted.stop());
   r = await restarted.batch('sync', undefined, true);
-  assert.equal(r.results[0].status, 'needsConfirm'); assert.equal(adapter.node, 'live edit');
-});
-test('conflicts get no suggestion; whole-card choice takes one side after the list is shown', async t => {
-  for (const [whole, expected] of [['project', 'mine'], ['tavern', 'theirs']]) {
-    const { service, adapter } = serviceFixture(t); adapter.node = 'mine'; adapter.remote = 'theirs';
-    let preview = await service.control({ action: 'diff', projectId: 'A' });
-    assert.equal(preview.slots[0].kind, 'conflict'); assert.equal(preview.slots[0].suggest, null);
-    await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] }), e => e.code === 'CONFLICT');
-    assert.equal(adapter.writes + adapter.pushes, 0);
-    await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, wholeCard: 'both' }), e => e.code === 'INVALID_CHOICE');
-    // 清单之后内容又变了：不写
-    adapter.remote = 'newer';
-    await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, wholeCard: whole }), e => e.code === 'STALE_PREVIEW');
-    adapter.remote = 'theirs';
-    preview = await service.control({ action: 'diff', projectId: 'A' });
-    await service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, wholeCard: whole });
-    assert.equal(adapter.node, expected); assert.equal(adapter.remote, expected); assert.ok(adapter.backupsTaken >= 1);
-  }
+  assert.equal(r.results[0].status, 'needsReconnect'); assert.equal(adapter.node, 'mine');
 });
 test('card and skill jobs share FIFO and cannot overwrite active or duplicate IDs', () => {
   const q = new JobQueue(); q.publish('card', { id: 'one' }); q.publish('skills', { id: 'two' }); q.publish('card', { id: 'three' });
@@ -187,11 +172,13 @@ test('card and skill jobs share FIFO and cannot overwrite active or duplicate ID
   q.finish({ id: 'two', consumerId: 'session-two', fatal: 'failure' }); assert.equal(q.active.job.id, 'three');
   assert.equal(q.result('two').fatal, 'failure');
 });
-test('path escape, absolute identifiers and symlinked project are refused', async t => {
+test('path escape, absolute identifiers, removed legacy actions and symlinked project are refused', async t => {
   const { service, root, dir } = serviceFixture(t);
-  for (const projectId of ['../A', 'Work/../A', 'C:/A', 'Work\\A']) await assert.rejects(service.control({ action: 'diff', projectId }));
+  for (const projectId of ['../A', 'Work/../A', 'C:/A', 'Work\\A']) await assert.rejects(service.control({ action: 'check', projectId }), e => e.code === 'INVALID_PATH');
   await assert.rejects(service.control({ action: 'attach', cardFile: '../A.png' }), e => e.code === 'INVALID_PATH');
-  await assert.rejects(service.control({ action: 'config', cardsRoot: root, pollIntervalMs: 1000 }), e => e.code === 'INVALID_CONFIG');
+  for (const action of ['diff', 'resolve', 'backups', 'restorePreview', 'restore', 'rebind', 'buildCard', 'setBackupDir', 'setAutoBackup', 'setBackupKeep']) {
+    await assert.rejects(service.control({ action, projectId: 'A' }), e => e.code === 'INVALID_ACTION');
+  }
   const target = path.join(root, 'outside'); fs.mkdirSync(target);
   const link = path.join(dir, 'escape'); fs.symlinkSync(target, link, 'junction');
   assert.throws(() => contained(dir, 'escape/file.md'), e => e.code === 'INVALID_PATH');
@@ -220,21 +207,27 @@ async function fileFixture(t, withWorld = false) {
   const card = { spec: 'chara_card_v2', spec_version: '2.0', data: { name: 'A', description: 'base', personality: '', scenario: '', first_mes: '', mes_example: '', system_prompt: '', post_history_instructions: '', alternate_greetings: [], extensions: {} } };
   if (withWorld) { card.data.extensions.world = 'Book'; card.data.character_book = { name: 'Book', entries: [] }; atomicJson(path.join(userDir, 'worlds', 'Book.json'), { entries: { 42: { uid: 42, key: ['key'], keysecondary: [], content: 'external body', comment: 'entry', constant: false, disable: false, order: 100, position: 0, depth: 4 } } }); }
   const pngPath = path.join(userDir, 'characters', 'A.png'); fs.writeFileSync(pngPath, embedChara(basePng, card));
+  const writeWorldEntries = (worldName, entriesArr) => {
+    const entries = Object.fromEntries((entriesArr ?? []).map((e, i) => { const x = e.extensions ?? {}; return [String(e.id ?? i), { uid: e.id ?? i, key: e.keys ?? [], keysecondary: e.secondary_keys ?? [], comment: e.comment ?? e.name ?? '', content: e.content ?? '', constant: Boolean(e.constant), selective: Boolean(e.selective), order: e.insertion_order ?? 100, position: x.position ?? (e.position === 'after_char' ? 1 : 0), disable: e.enabled === false, excludeRecursion: Boolean(x.exclude_recursion), preventRecursion: Boolean(x.prevent_recursion), delayUntilRecursion: Boolean(x.delay_until_recursion), probability: x.probability ?? 100, useProbability: Boolean(x.useProbability), depth: x.depth ?? 4, selectiveLogic: x.selectiveLogic ?? 0, outletName: x.outlet_name ?? '', group: x.group ?? '', groupOverride: Boolean(x.group_override), groupWeight: x.group_weight ?? 100, scanDepth: x.scan_depth ?? null, caseSensitive: x.case_sensitive ?? null, matchWholeWords: x.match_whole_words ?? null, useGroupScoring: Boolean(x.use_group_scoring), automationId: x.automation_id ?? '', role: x.role ?? 0, vectorized: Boolean(x.vectorized), displayIndex: x.display_index ?? i, sticky: x.sticky ?? null, cooldown: x.cooldown ?? null, delay: x.delay ?? null, matchPersonaDescription: Boolean(x.match_persona_description), matchCharacterDescription: Boolean(x.match_character_description), matchCharacterPersonality: Boolean(x.match_character_personality), matchCharacterDepthPrompt: Boolean(x.match_character_depth_prompt), matchScenario: Boolean(x.match_scenario), matchCreatorNotes: Boolean(x.match_creator_notes), triggers: x.triggers ?? [], ignoreBudget: Boolean(x.ignore_budget) }]; }));
+    atomicJson(path.join(userDir, 'worlds', `${worldName}.json`), { entries });
+  };
   const transport = async job => {
-    if (job.expected.card !== digest(fs.readFileSync(pngPath))) return { id: job.id, fatal: 'stale card' };
-    if (job.op === 'restore') {
-      const imported = readCardPng(Buffer.from(job.pngBase64, 'base64'));
-      imported.create_date = 'imported-date'; imported.chat = 'imported-chat'; imported.fav = false;
-      imported.data.create_date = 'imported-date'; imported.data.chat = 'imported-chat'; imported.data.fav = false; imported.data.extensions.fav = false;
-      fs.writeFileSync(pngPath, embedChara(basePng, imported));
-      if (job.worldName && job.world) atomicJson(path.join(userDir, 'worlds', `${job.worldName}.json`), job.world);
-      return { id: job.id, restored: true, mode: 'import' };
+    if (job.op === 'create') {
+      const target = path.join(userDir, 'characters', job.avatar);
+      fs.writeFileSync(target, Buffer.from(job.pngBase64, 'base64'));
+      if (job.worldName) writeWorldEntries(job.worldName, job.book?.entries ?? []);
+      return { id: job.id, avatar: job.avatar, created: true };
     }
-    fs.writeFileSync(pngPath, embedChara(fs.readFileSync(pngPath), job.card));
+    const targetPng = job.avatar ? path.join(userDir, 'characters', job.avatar) : pngPath;
+    if (job.expected?.card !== digest(fs.readFileSync(targetPng))) return { id: job.id, fatal: 'stale card' };
+    fs.writeFileSync(targetPng, embedChara(fs.readFileSync(targetPng), job.card));
+    const extWorld = job.card?.data?.extensions?.world;
+    if (extWorld && job.card?.data?.character_book?.entries) writeWorldEntries(extWorld, job.card.data.character_book.entries);
     return { id: job.id, card: 'written' };
   };
   const adapter = new FileSyncAdapter({ skillsRoot: config.skillsRoot, userDir, transport, queryResult: async () => ({ pending: true }) });
   const service = new SyncService({ cardsRoot, runtimeRoot: path.join(root, 'runtime'), adapter });
+  t.after(() => service.stop());
   return { root, userDir, cardsRoot, adapter, service, pngPath };
 }
 test('forge attach keeps original PNG, rejects initial same-name directory, and verifies external world', async t => {
@@ -245,7 +238,8 @@ test('forge attach keeps original PNG, rejects initial same-name directory, and 
   const project = await f.service.control({ action: 'attach', cardFile: 'A.png' }); assert.equal(project.attached, true);
   assert.deepEqual(fs.readFileSync(f.pngPath), original);
   assert.deepEqual(fs.readFileSync(path.join(f.cardsRoot, 'A', '.card-forge', 'originals', 'A.png')), original);
-  const diff = await f.service.control({ action: 'diff', projectId: project.id }); assert.equal(diff.clean, true); assert.ok(diff.slots.some(s => s.tavern === 'external body' && s.node === 'external body'));
+  const diff = (await f.service.control({ action: 'check', projectId: project.id })).results[0].diff;
+  assert.equal(diff.clean, true); assert.ok(diff.slots.some(s => s.tavern === 'external body' && s.node === 'external body'));
 });
 test('attach accepts a fresh Tavern card whose character_book is null', async t => {
   const f = await fileFixture(t);
@@ -254,68 +248,9 @@ test('attach accepts a fresh Tavern card whose character_book is null', async t 
   const original = fs.readFileSync(f.pngPath);
   const project = await f.service.control({ action: 'attach', cardFile: 'A.png' }); assert.equal(project.attached, true);
   assert.deepEqual(fs.readFileSync(f.pngPath), original);
-  assert.equal((await f.service.control({ action: 'diff', projectId: project.id })).clean, true);
+  assert.equal((await f.service.control({ action: 'check', projectId: project.id })).results[0].diff.clean, true);
   assert.deepEqual(fs.readdirSync(f.cardsRoot).filter(n => n.startsWith('.attach-')), []);
 });
-test('import restore requires preview/confirmation, rebuilds actual baseline and stays paused', async t => {
-  const f = await fileFixture(t); const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
-  const project = f.service.getProject(p.id), before = await f.adapter.snapshot(project), statePath = path.join(project.dir, '.card-forge', 'tavern-sync.json');
-  const backupId = await f.adapter.backup(project, before);
-  await f.adapter.writeBodies(project, before, [{ key: 'field:description', value: 'changed' }]);
-  await f.service.control({ action: 'sync', projectId: p.id }); assert.equal(readCardPng(f.pngPath).data.description, 'changed');
-  const preview = await f.service.control({ action: 'restorePreview', projectId: p.id, backupId });
-  await assert.rejects(f.service.control({ action: 'restore', projectId: p.id, previewId: preview.previewId }), e => e.code === 'CONFIRMATION_REQUIRED');
-  const result = await f.service.control({ action: 'restore', projectId: p.id, previewId: preview.previewId, confirm: true });
-  assert.equal(result.status, 'restored'); assert.equal(result.mode, 'import'); assert.equal(preview.mode, 'import'); assert.equal(preview.canRestore, true); assert.equal(readCardPng(f.pngPath).data.description, 'base');
-  const actual = f.adapter.remote(project), state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-  assert.deepEqual(state.slots, Object.fromEntries(Object.entries(actual.tavern.slots).map(([key, slot]) => [key, slotHash(slot.value)])));
-  assert.deepEqual((await f.adapter.snapshot(project)).rawFiles, before.rawFiles); assert.equal((await f.service.status()).projects[0].paused, true);
-  fs.mkdirSync(path.join(f.adapter.backupRoot(project), 'push-old'), { recursive: true });
-  const old = (await f.service.control({ action: 'backups', projectId: p.id })).backups.find(b => b.id === 'push-old'); assert.equal(old.supported, false);
-});
-test('import accepts PNG metadata changes, preserves body/world and aligns only host-owned node metadata', async t => {
-  const f = await fileFixture(t, true), original = readCardPng(f.pngPath);
-  original.data.create_date = 'old-date'; original.data.chat = 'old-chat'; original.data.fav = true; original.data.extensions.fav = true;
-  fs.writeFileSync(f.pngPath, embedChara(basePng, original));
-  const p = await f.service.control({ action: 'attach', cardFile: 'A.png' }), project = f.service.getProject(p.id);
-  const before = await f.adapter.snapshot(project), backupId = await f.adapter.backup(project, before);
-  const changed = readCardPng(f.pngPath); changed.data.description = 'current, not backup'; fs.writeFileSync(f.pngPath, embedChara(basePng, changed));
-  atomicJson(path.join(f.userDir, 'worlds', 'Book.json'), { entries: {} });
-  const preview = await f.service.control({ action: 'restorePreview', projectId: p.id, backupId });
-  const result = await f.service.control({ action: 'restore', projectId: p.id, previewId: preview.previewId, confirm: true });
-  const after = await f.adapter.snapshot(project), imported = readCardPng(f.pngPath);
-  assert.equal(result.mode, 'import'); assert.equal((await f.service.status()).capabilities.restoreMode, 'import');
-  assert.notEqual(digest(fs.readFileSync(f.pngPath)), digest(before.png)); assert.equal(imported.data.description, 'base');
-  assert.equal(imported.data.create_date, 'imported-date'); assert.equal(after.card.data.chat, 'imported-chat'); assert.equal(after.card.data.extensions.fav, false);
-  assert.equal(after.tavern.slots['entry:42'].value, 'external body'); assert.equal(compareSnapshot(after).clean, true);
-  assert.equal(f.service.getProject(p.id).paused, true); assert.ok(result.safetyBackupId);
-});
-test('import still rejects wrong body, author settings or world data', async t => {
-  for (const changedPart of ['description', 'name', 'world']) {
-    const f = await fileFixture(t, true), p = await f.service.control({ action: 'attach', cardFile: 'A.png' }), project = f.service.getProject(p.id);
-    const before = await f.adapter.snapshot(project), backupId = await f.adapter.backup(project, before), stateFile = path.join(project.dir, '.card-forge', 'tavern-sync.json'), baseline = fs.readFileSync(stateFile, 'utf8');
-    const transport = f.adapter.transport;
-    f.adapter.transport = async job => {
-      const result = await transport(job);
-      if (changedPart === 'world') atomicJson(path.join(f.userDir, 'worlds', 'Book.json'), { entries: {} });
-      else { const card = readCardPng(f.pngPath); card.data[changedPart] = 'incorrect import'; fs.writeFileSync(f.pngPath, embedChara(basePng, card)); }
-      return result;
-    };
-    const preview = await f.service.control({ action: 'restorePreview', projectId: p.id, backupId });
-    await assert.rejects(f.service.control({ action: 'restore', projectId: p.id, previewId: preview.previewId, confirm: true }), e => e.code === 'RESTORE_VERIFY_FAILED');
-    assert.equal(fs.readFileSync(stateFile, 'utf8'), baseline); assert.equal(f.service.getProject(p.id).paused, true);
-  }
-});
-test('failed restore keeps card paused and prevents resume/sync until complete recovery', async t => {
-  const f = await fileFixture(t); const p = await f.service.control({ action: 'attach', cardFile: 'A.png' }); const project = f.service.getProject(p.id);
-  const backupId = await f.adapter.backup(project, await f.adapter.snapshot(project));
-  const preview = await f.service.control({ action: 'restorePreview', projectId: p.id, backupId });
-  f.adapter.transport = async job => ({ id: job.id, fatal: 'restore unsupported' });
-  await assert.rejects(f.service.control({ action: 'restore', projectId: p.id, previewId: preview.previewId, confirm: true }), e => e.code === 'RESTORE_FAILED');
-  await assert.rejects(f.service.control({ action: 'projectPause', projectId: p.id, paused: false }), e => e.code === 'RESTORE_REQUIRED');
-  const result = await f.service.control({ action: 'sync', projectId: p.id }); assert.equal(result.results[0].error.code, 'RESTORE_REQUIRED');
-});
-
 test('stable world digest is shared with browser and ignores only object order/formatting', async t => {
   const { worldDigest } = await import('../extension/protocol.js');
   const a = { entries: { 1: { key: ['a', 'b'], content: 'x' } }, extra: true };
@@ -326,28 +261,13 @@ test('stable world digest is shared with browser and ignores only object order/f
   assert.equal(remote.expected.world, await worldDigest(JSON.parse(remote.worldRaw)));
   assert.equal(remote.expected.worldName, 'Book');
 });
-test('clean sync does not churn baseline or invalidate diff preview', async t => {
+test('clean sync does not churn baseline or invalidate revision', async t => {
   const f = await fileFixture(t); const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
   const before = tree(path.join(f.cardsRoot, 'A'));
-  const a = await f.service.control({ action: 'diff', projectId: p.id });
+  const a = (await f.service.control({ action: 'check', projectId: p.id })).results[0].diff;
   await f.service.control({ action: 'sync', projectId: p.id });
-  const b = await f.service.control({ action: 'diff', projectId: p.id });
+  const b = (await f.service.control({ action: 'check', projectId: p.id })).results[0].diff;
   assert.equal(a.revision, b.revision); assert.deepEqual(tree(path.join(f.cardsRoot, 'A')), before);
-});
-test('complete backups restore pending files together with their baseline references', async t => {
-  const f = await fileFixture(t); const p = await f.service.control({ action: 'attach', cardFile: 'A.png' }); const project = f.service.getProject(p.id);
-  const stateFile = path.join(project.dir, '.card-forge', 'tavern-sync.json');
-  const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-  state.pending = { 'field:description': { file: '待归位/conflict.md', tavern: slotHash('base') } };
-  atomicJson(stateFile, state); fs.mkdirSync(path.join(project.dir, '待归位')); fs.writeFileSync(path.join(project.dir, '待归位', 'conflict.md'), 'original conflict');
-  const backupId = await f.adapter.backup(project, await f.adapter.snapshot(project));
-  fs.unlinkSync(path.join(project.dir, '待归位', 'conflict.md'));
-  const preview = await f.service.control({ action: 'restorePreview', projectId: p.id, backupId });
-  await f.service.control({ action: 'restore', projectId: p.id, previewId: preview.previewId, confirm: true });
-  assert.equal(fs.readFileSync(path.join(project.dir, '待归位', 'conflict.md'), 'utf8'), 'original conflict');
-  const restoredState = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-  assert.deepEqual(restoredState.pending, state.pending); assert.equal(restoredState.cardFile, state.cardFile);
-  assert.deepEqual(restoredState.slots, Object.fromEntries(Object.entries(f.adapter.remote(project).tavern.slots).map(([key, slot]) => [key, slotHash(slot.value)])));
 });
 
 // New-entry tests use the real forge parser/assembler and common file adapter.
@@ -360,7 +280,7 @@ async function newEntryFixture(t, front = '') {
   fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, raw);
   return { ...f, project, file, raw, engine: new SyncEngine(f.adapter) };
 }
-test('new world file: read-only preview, backed-up ID, push and baseline, no duplicate after rename', async t => {
+test('new world file: read-only preview, assigned ID, push and baseline, no duplicate after rename', async t => {
   const f = await newEntryFixture(t), originalTree = tree(f.project.dir);
   const a = await f.adapter.snapshot(f.project), b = await f.adapter.snapshot(f.project);
   assert.equal(a.idAssignments.length, 1); assert.deepEqual(a.idAssignments, b.idAssignments);
@@ -368,10 +288,9 @@ test('new world file: read-only preview, backed-up ID, push and baseline, no dup
   assert.equal(compareSnapshot(a).slots.filter(s => s.newEntry).length, 1);
   const result = await f.engine.run(f.project);
   assert.equal(result.status, 'clean'); assert.equal(result.assignedIds.length, 1);
-  const { id, uid, relPath } = result.assignedIds[0], written = fs.readFileSync(f.file, 'utf8');
+  assert.equal('backupId' in result, false);
+  const { id, uid } = result.assignedIds[0], written = fs.readFileSync(f.file, 'utf8');
   assert.equal(written.replace(`id: ${id}\n`, ''), f.raw);
-  const backup = JSON.parse(fs.readFileSync(path.join(f.adapter.backupRoot(f.project), result.backupId, 'snapshot.json'), 'utf8'));
-  assert.equal(backup.nodes[relPath], f.raw);
   const card = readCardPng(f.pngPath); assert.equal(card.data.character_book.entries.length, 1);
   assert.equal(card.data.character_book.entries[0].id, uid);
   assert.equal(card.data.character_book.entries[0].content, 'New entry body.');
@@ -420,17 +339,18 @@ test('new entry without reliable matching baseline is refused before ID write ev
     assert.deepEqual(tree(f.project.dir), before); assert.deepEqual(fs.readFileSync(f.pngPath), png);
   }
 });
-test('remote deletion is not resurrected, including a UID retained after both sides removed it', async t => {
+test('one-sided entry deletion syncs cleanly; modified entry deleted on one side still blocks', async t => {
   const f = await newEntryFixture(t); const result = await f.engine.run(f.project);
+  const uid = result.assignedIds[0].uid;
+  // 酒馆把刚同步好的那条删了（本地未改）：自动同步删除本地文件
   const card = readCardPng(f.pngPath); card.data.character_book.entries = [];
   fs.writeFileSync(f.pngPath, embedChara(basePng, card));
-  const png = fs.readFileSync(f.pngPath), raw = fs.readFileSync(f.file, 'utf8');
-  await assert.rejects(f.engine.run(f.project, { direction: 'push', force: true }), e => e.code === 'UNSUPPORTED_DIFFERENCE');
-  assert.deepEqual(fs.readFileSync(f.pngPath), png);
-  fs.unlinkSync(f.file); assert.equal((await f.engine.run(f.project)).status, 'clean');
-  const s = await f.adapter.snapshot(f.project); assert.ok(s.baseline.slots[`entry:${result.assignedIds[0].uid}`]);
-  fs.writeFileSync(f.file, raw);
-  await assert.rejects(f.engine.run(f.project), e => e.code === 'UNSUPPORTED_DIFFERENCE');
+  assert.equal((await f.engine.run(f.project)).status, 'clean');
+  assert.equal(fs.existsSync(f.file), false);
+  const s = await f.adapter.snapshot(f.project); assert.ok(s.baseline.slots[`entry:${uid}`]);
+  // 已在历史基线里删过的同一 UID 改了正文再写回来：与基线不同，算冲突阻断
+  fs.writeFileSync(f.file, `---\nid: ${result.assignedIds[0].id}\ntype: lore\ntarget: character_book\ntitle: New entry\nkeys: [new]\n---\n\n<!-- body -->\nChanged after remote delete.\n`);
+  await assert.rejects(f.engine.run(f.project), e => e.code === "UNSUPPORTED_DIFFERENCE");
 });
 test('duplicate explicit UIDs fail rather than overwrite either entry', async t => {
   const f = await newEntryFixture(t, 'id: author-one\ntavern:\n  id: 77\n');
@@ -450,19 +370,17 @@ test('generated UID avoids remote and historical collisions; explicit occupied U
     const assignments = planWorldEntryIds(scan, local.rawFiles, remote, baseline, libs);
     assert.notEqual(assignments[0].uid, uid);
   }
-  // 只缺 id、写了酒馆里已有的 tavern.id：就是那一条，补 id 时保留编号，不再当成被占用
   fs.writeFileSync(f.file, f.raw.replace('title: New entry', `tavern:\n  id: ${uid}\ntitle: New entry`));
   const scan = await libs.nodes.scanCard(f.project.dir), current = f.adapter.localSnapshot(f.project);
   const kept = planWorldEntryIds(scan, current.rawFiles, { [`entry:${uid}`]: { value: 'occupied' } }, { slots: { [`entry:${uid}`]: slotHash('old') } }, libs);
   assert.equal(kept.length, 1); assert.equal(String(kept[0].uid), String(uid)); assert.match(kept[0].text, /\nid: world-/);
-  // 本地两个只缺 id 的文件用同一个 tavern.id：仍拒绝
   fs.writeFileSync(path.join(f.project.dir, 'world_book', 'copy.md'), fs.readFileSync(f.file, 'utf8').replace('New entry body.', 'Copy body.'));
   const scan2 = await libs.nodes.scanCard(f.project.dir), current2 = f.adapter.localSnapshot(f.project);
   assert.throws(() => planWorldEntryIds(scan2, current2.rawFiles, {}, null, libs), e => e.code === 'ENTRY_UID_COLLISION');
 });
-test('editing during backup invalidates new-entry plan without replacing author text or pushing', async t => {
-  const f = await newEntryFixture(t), backup = f.adapter.backup.bind(f.adapter), png = fs.readFileSync(f.pngPath);
-  f.adapter.backup = async (...args) => { const id = await backup(...args); fs.writeFileSync(f.file, f.raw + 'Concurrent edit.\n'); return id; };
+test('concurrent edit before writeBodies invalidates new-entry plan without replacing author text or pushing', async t => {
+  const f = await newEntryFixture(t), writeBodies = f.adapter.writeBodies.bind(f.adapter), png = fs.readFileSync(f.pngPath);
+  f.adapter.writeBodies = async (...args) => { fs.writeFileSync(f.file, f.raw + 'Concurrent edit.\n'); return writeBodies(...args); };
   await assert.rejects(f.engine.run(f.project), e => e.code === 'STALE_PREVIEW');
   assert.equal(fs.readFileSync(f.file, 'utf8'), f.raw + 'Concurrent edit.\n');
   assert.deepEqual(fs.readFileSync(f.pngPath), png);
@@ -482,8 +400,7 @@ test('notes in card root do not change local revision; sync files do', async t =
   fs.writeFileSync(f.file, f.raw + 'more\n');
   assert.notEqual(f.adapter.localRevision(f.project), rev);
 });
-test('queue: different cards run in parallel, same card in order, global waits for all', async t => {
-  const { SerialQueue } = await import('../src/safety.mjs');
+test('queue: different cards run in parallel, same card in order, global waits for all', async () => {
   const q = new SerialQueue(), log = [];
   let releaseA; const gateA = new Promise(r => { releaseA = r; });
   const a1 = q.run('a1', async () => { await gateA; log.push('a1'); }, 'a');
@@ -496,12 +413,10 @@ test('queue: different cards run in parallel, same card in order, global waits f
   assert.deepEqual(log, ['b1', 'a1', 'a2', 'g', 'b2']);
   assert.equal(q.size, 0); await q.tail;
 });
-test('service.json is filled with defaults and bad values are corrected', async () => {
-  const { normalizeState, DEFAULT_STATE } = await import('../src/sync-service.mjs');
+test('service.json is filled with defaults and legacy backup/polling keys are ignored', () => {
   assert.deepEqual(normalizeState(null), { ...DEFAULT_STATE });
-  const s = normalizeState({ paused: 'no', pollIntervalMs: 5, autoBackupBeforeOverwrite: false, activeCardFile: '  A.png ', assembleRoot: 'D:\\old' });
-  assert.equal(s.paused, true); assert.equal(s.pollIntervalMs, 2000); assert.equal(s.autoBackupBeforeOverwrite, false);
-  assert.equal(s.activeCardFile, 'A.png'); assert.equal('assembleRoot' in s, false);
+  const s = normalizeState({ paused: 'no', pollIntervalMs: 5, autoBackupBeforeOverwrite: false, backupKeep: 10, activeCardFile: '  A.png ', activeWorldName: ' Book ', assembleRoot: 'D:\\old' });
+  assert.deepEqual(s, { paused: true, activeCardFile: 'A.png', activeWorldName: 'Book' });
 });
 test('bidirectional real-time sync covers worldbook entry settings, Tavern-created entries, and alternate greetings', async t => {
   const f = await fileFixture(t, true);
@@ -510,7 +425,6 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   const engine = new SyncEngine(f.adapter);
   const worldPath = path.join(f.userDir, 'worlds', 'Book.json');
 
-  // 1. Tavern modifies entry settings (keys, constant, order, comment) -> syncs back to .md frontmatter
   const w1 = JSON.parse(fs.readFileSync(worldPath, 'utf8'));
   w1.entries[42].key = ['key', 'tavern-kw'];
   w1.entries[42].constant = true;
@@ -523,7 +437,6 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   assert.match(md1, /constant:\s*true/);
   assert.match(md1, /order:\s*150/);
 
-  // 2. Tavern adds a brand new worldbook entry -> creates world_book/<title>.md locally
   const w2 = JSON.parse(fs.readFileSync(worldPath, 'utf8'));
   w2.entries[99] = { uid: 99, key: ['remote-new'], keysecondary: [], content: 'Created in Tavern.', comment: 'TavernAdded', constant: false, disable: false, order: 160, position: 0, depth: 4 };
   fs.writeFileSync(worldPath, JSON.stringify(w2, null, 2));
@@ -532,7 +445,6 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   assert.equal(fs.existsSync(newMdPath), true);
   assert.match(fs.readFileSync(newMdPath, 'utf8'), /Created in Tavern\./);
 
-  // 3. Tavern adds an alternate greeting -> creates message/1.md locally
   const c3 = readCardPng(f.pngPath);
   c3.data.alternate_greetings = ['Hello from Tavern alt greeting!'];
   fs.writeFileSync(f.pngPath, embedChara(basePng, c3));
@@ -541,49 +453,7 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   assert.equal(fs.existsSync(greet1Path), true);
   assert.match(fs.readFileSync(greet1Path, 'utf8'), /Hello from Tavern alt greeting!/);
 });
-
-
-// ---- 备份设置只确认一次、只保留最近 N 份、连着的卡被删后改连 ----
-test('auto-backup off is confirmed once in settings; later sync skips backup without asking again', async t => {
-  const { service, adapter } = serviceFixture(t);
-  await assert.rejects(service.control({ action: 'setAutoBackup', enabled: false }), e => e.code === 'CONFIRMATION_REQUIRED');
-  await service.control({ action: 'setAutoBackup', enabled: false, acceptDataLossRisk: true });
-  adapter.node = 'local';
-  const res = await service.control({ action: 'sync', projectId: 'A', direction: 'push' });
-  assert.equal(res.results[0].error, undefined);
-  assert.equal(adapter.remote, 'local');
-  assert.equal(adapter.backupsTaken, 0);
-});
-test('with auto-backup on, skipping backup for a single operation still needs its own confirmation', async t => {
-  const { service, adapter } = serviceFixture(t);
-  adapter.node = 'local';
-  const rejected = await service.control({ action: 'sync', projectId: 'A', direction: 'push', skipBackup: true });
-  assert.equal(rejected.results[0].error.code, 'CONFIRMATION_REQUIRED');
-  assert.equal(adapter.pushes, 0);
-  await service.control({ action: 'sync', projectId: 'A', direction: 'push' });
-  assert.equal(adapter.backupsTaken, 1);
-});
-test('backupKeep defaults to 5, rejects bad values, and is reported in status', async t => {
-  const { service } = serviceFixture(t);
-  assert.equal((await service.status()).backupKeep, 5);
-  await assert.rejects(service.control({ action: 'setBackupKeep', keep: -1 }), e => e.code === 'INVALID_ACTION');
-  await assert.rejects(service.control({ action: 'setBackupKeep', keep: 1.5 }), e => e.code === 'INVALID_ACTION');
-  assert.equal((await service.control({ action: 'setBackupKeep', keep: 0 })).backupKeep, 0);
-  assert.equal((await service.status()).backupKeep, 0);
-});
-test('pruneBackups keeps only the newest N stamped backups and never touches other folders', t => {
-  const root = temp(t);
-  const names = ['2026-10-01T00-00-00-000Z-aaaa1111', '2026-10-02T00-00-00-000Z-bbbb2222', '2026-10-03T00-00-00-000Z-cccc3333', '2026-10-04T00-00-00-000Z-接入前的工程', '作者手放的资料'];
-  for (const n of names) fs.mkdirSync(path.join(root, n), { recursive: true });
-  const ctx = { backupRoot: () => root };
-  assert.deepEqual(FileSyncAdapter.prototype.pruneBackups.call(ctx, {}, '', 0), []);
-  assert.equal(fs.readdirSync(root).length, 5);
-  // 「接入前的工程」整目录备份和作者自己放的东西不计数、不删除
-  const removed = FileSyncAdapter.prototype.pruneBackups.call(ctx, {}, '', 2);
-  assert.deepEqual(removed, [names[0]]);
-  assert.deepEqual(fs.readdirSync(root).sort(), [names[1], names[2], names[3], names[4]].sort());
-});
-test('deleted card: status says cardMissing, automatic sync records once and writes nothing, manual sync explains', async t => {
+test('deleted card: status says cardMissing, automatic sync marks onlyNew once and writes nothing, manual sync explains', async t => {
   const adapter = new MemoryAdapter();
   adapter.listCards = () => [{ cardFile: 'B.png', name: 'B' }];
   const { service } = serviceFixture(t, adapter);
@@ -594,36 +464,58 @@ test('deleted card: status says cardMissing, automatic sync records once and wri
   adapter.node = 'local';
   for (let i = 0; i < 3; i++) {
     const r = await service.batch('sync', 'A', true);
-    assert.equal(r.results[0].status, 'cardMissing');
+    assert.equal(r.results[0].status, 'needsReconnect');
+    assert.equal(r.results[0].onlyNew, true);
   }
-  assert.equal(service.logs.filter(l => l.action === 'cardMissing').length, 1);
-  assert.equal(adapter.writes + adapter.pushes + adapter.saved + adapter.backupsTaken, 0);
+  assert.equal(service.logs.filter(l => l.action === 'needsReconnect').length, 1);
+  assert.equal(adapter.writes + adapter.pushes + adapter.saved, 0);
   const manual = await service.control({ action: 'sync', projectId: 'A' });
   assert.equal(manual.results[0].error.code, 'CARD_MISSING');
+  await assert.rejects(service.control({ action: 'reconnectOverwrite', projectId: 'A' }), e => e.code === 'CARD_MISSING');
 });
-test('rebind moves the project to the re-imported card; clean starts syncing, different only lists differences', async t => {
-  const adapter = new MemoryAdapter();
-  adapter.listCards = () => [{ cardFile: 'B.png', name: 'B' }];
-  const { dir, service } = serviceFixture(t, adapter);
-  await assert.rejects(service.control({ action: 'rebind', projectId: 'A', cardFile: 'C.png' }), e => e.code === 'CARD_NOT_FOUND');
-  const clean = await service.control({ action: 'rebind', projectId: 'A', cardFile: 'B.png' });
-  assert.equal(clean.clean, true);
-  assert.equal(clean.from, 'A.png');
-  const binding = JSON.parse(fs.readFileSync(path.join(dir, '.card-forge', 'bridge.json'), 'utf8'));
-  assert.equal(binding.cardFile, 'B.png');
-  assert.equal(binding.projectName, 'A');
-  assert.notEqual((await service.status()).projects[0].status, 'cardMissing');
-  adapter.remote = 'changed in tavern';
-  const pushesBefore = adapter.pushes, writesBefore = adapter.writes;
-  adapter.listCards = () => [{ cardFile: 'B.png', name: 'B' }, { cardFile: 'D.png', name: 'D' }];
-  const diff = await service.control({ action: 'rebind', projectId: 'A', cardFile: 'D.png' });
-  assert.equal(diff.clean, false);
-  assert.ok(diff.diff.changedSlots.length > 0);
-  assert.equal(adapter.pushes, pushesBefore);
-  assert.equal(adapter.writes, writesBefore);
-});
+test('connect and reconnectNew / reconnectOverwrite: unattached creates new card+world avoiding name clashes; dirty reconnect offers overwrite or new card', async t => {
+  const f = await fileFixture(t, true);
+  // 1. 还没进过酒馆的本地工程（名字 A、世界书名 Book 都和酒馆里现有的重名）→ 点「连接」新建 A 2.png 和 Book 2，旧卡和旧世界书不动
+  const bDir = path.join(f.cardsRoot, 'A');
+  fs.mkdirSync(path.join(bDir, 'world_book'), { recursive: true });
+  fs.writeFileSync(path.join(bDir, 'card.md'), '---\nid: card-root\ntype: card\nname: A\ntavern:\n  data:\n    extensions:\n      world: Book\n---\n\n<!-- body -->\n');
+  fs.writeFileSync(path.join(bDir, 'description.md'), 'new local card\n');
+  fs.writeFileSync(path.join(bDir, "world_book", "entry.md"), "---\nid: wb-1\ntype: lore\ntarget: character_book\ntitle: NewEntry\nkeys: [k]\norder: 100\nposition: before_char\ntavern:\n  id: 1\n---\n\n<!-- body -->\nnew world body\n");
+  const oldPng = fs.readFileSync(f.pngPath);
+  const oldWorld = fs.readFileSync(path.join(f.userDir, 'worlds', 'Book.json'), 'utf8');
 
-test('overwrite attach keeps non-card files (records, candidates, notes, research) and lists them first', async t => {
+  const connected = await f.service.control({ action: 'connect', projectId: 'A' });
+  assert.equal(connected.cardFile, 'A 2.png');
+  assert.equal(connected.worldName, 'Book 2');
+  assert.equal(connected.status, 'clean');
+  // 旧卡 A.png、旧世界书 Book.json 完全没动；本地 card.md 里的 world: Book 也没被篡改（worldOverride 记在 bridge.json）
+  assert.deepEqual(fs.readFileSync(f.pngPath), oldPng);
+  assert.equal(fs.readFileSync(path.join(f.userDir, 'worlds', 'Book.json'), 'utf8'), oldWorld);
+  assert.match(fs.readFileSync(path.join(bDir, 'card.md'), 'utf8'), /world: Book\n/);
+  assert.equal(readCardPng(path.join(f.userDir, 'characters', 'A 2.png')).data.description, 'new local card');
+  assert.ok(fs.existsSync(path.join(f.userDir, 'worlds', 'Book 2.json')));
+
+  // 2. 断开期间酒馆改了 A 2.png：点「连接」停在 needsReconnect；选「以本地为准覆盖」把本地写进 A 2.png；选「新建卡」再建 A 3.png 和 Book 3
+  await f.service.control({ action: 'pause' });
+  const c2Path = path.join(f.userDir, 'characters', 'A 2.png');
+  const c2 = readCardPng(c2Path); c2.data.description = 'tavern offline edit';
+  fs.writeFileSync(c2Path, embedChara(basePng, c2));
+  await f.service.control({ action: 'resume' });
+  const dirtyConnect = await f.service.control({ action: 'connect', projectId: 'A' });
+  assert.equal(dirtyConnect.status, 'needsReconnect');
+  assert.equal(readCardPng(c2Path).data.description, 'tavern offline edit');
+
+  const overwritten = await f.service.control({ action: 'reconnectOverwrite', projectId: 'A' });
+  assert.equal(overwritten.status, 'clean');
+  assert.equal(readCardPng(c2Path).data.description, 'new local card');
+
+  const asNew = await f.service.control({ action: 'reconnectNew', projectId: 'A' });
+  assert.equal(asNew.cardFile, 'A 3.png');
+  assert.equal(asNew.worldName, 'Book 3');
+  assert.ok(fs.existsSync(path.join(f.userDir, 'characters', 'A 3.png')));
+  assert.ok(fs.existsSync(path.join(f.userDir, 'worlds', 'Book 3.json')));
+});
+test('overwrite attach keeps non-card files (records, candidates, notes, research) without creating backups', async t => {
   const f = await fileFixture(t, true);
   const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
   const dir = path.join(f.cardsRoot, p.id);
@@ -634,32 +526,21 @@ test('overwrite attach keeps non-card files (records, candidates, notes, researc
   assert.equal(fs.readFileSync(path.join(dir, '候选', 'entry', '旧节点.md'), 'utf8'), 'c');
   assert.equal(fs.readFileSync(path.join(dir, 'note', 'n.md'), 'utf8'), 'n');
   assert.equal(fs.readFileSync(path.join(dir, '调研.md'), 'utf8'), 'r');
-  const backups = fs.readdirSync(f.adapter.backupRoot(f.service.getProject(p.id)));
-  assert.ok(backups.some(n => n.endsWith('-接入前的工程')), JSON.stringify(backups));
-  assert.equal((await f.service.control({ action: 'diff', projectId: p.id })).clean, true);
+  assert.equal(fs.existsSync(path.join(f.cardsRoot, 'backups')), false);
+  assert.equal((await f.service.control({ action: 'check', projectId: p.id })).results[0].diff.clean, true);
 });
-test('rebind after delete-and-reimport renumbers matched entries by title and body, after confirmation', async t => {
+test('realtime watcher and changeStamp trigger automatic sync when local or tavern files change', async t => {
   const f = await fileFixture(t, true);
   const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
-  // 玩家删卡重导：新卡文件名 B.png，酒馆把条目重新编号成 7，原来的 42 被另一条新条目占用
-  fs.copyFileSync(f.pngPath, path.join(f.userDir, 'characters', 'B.png'));
-  fs.unlinkSync(f.pngPath);
-  const entry = (uid, comment, content) => ({ uid, key: ['key'], keysecondary: [], content, comment, constant: false, disable: false, order: 100, position: 0, depth: 4 });
-  atomicJson(path.join(f.userDir, 'worlds', 'Book.json'), { entries: { 7: entry(7, 'entry', 'external body'), 42: entry(42, 'other', 'new in tavern') } });
-  const first = await f.service.control({ action: 'rebind', projectId: p.id, cardFile: 'B.png' });
-  assert.equal(first.needsConfirm, true);
-  assert.deepEqual(first.plan.changes.map(c => [String(c.from), c.to]), [['42', 7]]);
-  assert.deepEqual(first.plan.remoteOnly.map(r => r.title), ['other']);
-  const dir = path.join(f.cardsRoot, p.id), binding = () => JSON.parse(fs.readFileSync(path.join(dir, '.card-forge', 'bridge.json'), 'utf8'));
-  assert.equal(binding().cardFile, 'A.png');
-  const done = await f.service.control({ action: 'rebind', projectId: p.id, cardFile: 'B.png', confirm: true, planId: first.plan.planId });
-  assert.equal(done.renumbered.changed.length, 1);
-  assert.ok(done.renumbered.backupId.endsWith('-改连前的条目'));
-  assert.equal(binding().cardFile, 'B.png');
-  const file = fs.readdirSync(path.join(dir, 'world_book')).find(n => n.endsWith('.md'));
-  const raw = fs.readFileSync(path.join(dir, 'world_book', file), 'utf8');
-  assert.match(raw, /tavern:[\s\S]*id: 7/);
-  assert.ok(raw.includes('external body'));
-  const diff = await f.service.control({ action: 'diff', projectId: p.id });
-  assert.ok(!diff.slots.some(s => s.key === 'entry:7' && s.node !== s.tavern));
+  await f.service.control({ action: 'followCard', cardFile: 'A.png' });
+  await f.service.control({ action: 'resume' });
+  f.service.debounceMs = 15;
+  const project = f.service.getProject(p.id);
+  const stamp0 = f.adapter.changeStamp(project);
+  fs.writeFileSync(path.join(project.dir, 'description.md'), 'realtime edit\n');
+  const stamp1 = f.adapter.changeStamp(project);
+  assert.notEqual(stamp1, stamp0);
+  f.service.schedule(p.id);
+  await new Promise(r => setTimeout(r, 120));
+  assert.equal(readCardPng(f.pngPath).data.description, 'realtime edit');
 });
