@@ -43,7 +43,7 @@ function formatLogLine(item) {
     return line.length > 260 ? `${line.slice(0, 260)}…` : line;
 }
 
-export function mountSettings({ client, getContext }) {
+export function mountSettings({ client, getContext, refreshCards }) {
     const container = document.getElementById('extensions_settings');
     if (!container) throw new Error('未找到酒馆扩展设置容器 #extensions_settings');
     if (document.getElementById('tt-card-bridge-settings')) return null;
@@ -211,11 +211,12 @@ export function mountSettings({ client, getContext }) {
     // 连接或新建后让酒馆打开那张卡：后台只同步酒馆里打开的卡
     async function openCard(cardFile) {
         if (!cardFile) return;
-        await getContext().getCharacters?.();
+        if (typeof refreshCards === 'function') await refreshCards([cardFile]);
+        else await getContext().getCharacters?.();
         const now = getContext();
         if (now.groupId) throw new Error(`已连上「${cardFile}」。酒馆里开着群聊，退出群聊后打开这张卡，同步才会开始。`);
-        const idx = now.characters.findIndex(c => c.avatar === cardFile);
-        if (idx >= 0 && now.characters[now.characterId]?.avatar !== cardFile) await now.selectCharacterById(idx);
+        const idx = now.characters.findIndex(c => c.avatar?.toLowerCase() === cardFile.toLowerCase());
+        if (idx >= 0 && now.characters[now.characterId]?.avatar?.toLowerCase() !== cardFile.toLowerCase()) await now.selectCharacterById(idx);
         await checkCardFollow({ force: true });
     }
     function renderControls() {

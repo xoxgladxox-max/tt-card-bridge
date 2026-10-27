@@ -210,7 +210,7 @@ async function tick() {
 
 if (!window.__TT_CARD_BRIDGE__) {
   try {
-    panel = mountSettings({ client, getContext: ctx });
+    panel = mountSettings({ client, getContext: ctx, refreshCards });
     const st = ctx();
     if (st?.eventSource && st?.event_types?.CHAT_CHANGED) {
       st.eventSource.on(st.event_types.CHAT_CHANGED, () => { panel?.checkCardFollow?.(); });

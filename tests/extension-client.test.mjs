@@ -209,7 +209,7 @@ async function mutationFixture(options = {}) {
         }
         if (url === '/api/characters/import') {
             assert.ok(init.body instanceof FormData);
-            assert.equal(init.body.get('preserved_name'), 'x.png');
+            assert.equal(init.body.get('preserved_name'), null);
             assert.equal(init.body.get('file_type'), 'png');
             assert.equal(init.headers.has('Content-Type'), false);
             assert.equal(init.headers.get('X-CSRF-Token'), 'test-only');
@@ -286,7 +286,7 @@ test('create imports PNG with preserved_name, creates new world book, and refuse
     const report = await f.mutations.create({ id: 'new-1', op: 'create', avatar: 'x.png', pngBase64: Buffer.from('new-png').toString('base64'), worldName: 'fresh-book', book: { entries: [{ uid: 0, content: 'new world' }] } });
     assert.equal(report.created, true);
     assert.equal(report.avatar, 'x.png');
-    assert.deepEqual(f.writes, ['import', 'world']);
+    assert.deepEqual(f.writes, ['import', 'world', 'card']);
     const clashCard = await mutationFixture({ characters: [{ avatar: 'X.png' }], worldNames: [] });
     await assert.rejects(clashCard.mutations.create({ id: 'new-2', op: 'create', avatar: 'x.png', pngBase64: Buffer.from('new-png').toString('base64') }), /已经有「x.png」/);
     assert.deepEqual(clashCard.writes, []);

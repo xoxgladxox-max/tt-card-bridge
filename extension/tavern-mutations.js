@@ -105,7 +105,7 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         const form = new FormData();
         form.append('avatar', new Blob([bytes], { type: 'image/png' }), job.avatar);
         form.append('file_type', 'png');
-        form.append('preserved_name', job.avatar);
+        if (job.preserveFileName) form.append('preserved_name', job.avatar);
         const headers = new Headers(getContext().getRequestHeaders());
         headers.delete('Content-Type');
         const response = await fetchImpl('/api/characters/import', { method: 'POST', headers, body: form });
@@ -113,7 +113,11 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         const imported = await response.json();
         const avatar = imported.character?.avatar ?? `${imported.file_name}.png`;
         const report = { id: job.id, avatar, created: true };
-        if (job.worldName) report.world = await syncWorld(job.worldName, job.book ?? { entries: [] });
+        if (job.worldName) {
+            report.world = await syncWorld(job.worldName, job.book ?? { entries: [] });
+            // TauriTavern 在 import 时如果采用内嵌世界书，可能按卡名把 extensions.world 改成卡名；这里显式对齐回目标世界书名
+            await request('/api/characters/merge-attributes', { avatar, data: { extensions: { world: job.worldName } } });
+        }
         try {
             if (job.worldName) await refreshWorld(job.worldName);
             report.refreshed = await refreshCards([avatar]);

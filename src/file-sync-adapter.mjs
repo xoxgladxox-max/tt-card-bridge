@@ -445,12 +445,14 @@ export class FileSyncAdapter {
   async planNewCard(project) {
     const libs = await this.libraries();
     const scan = await this.scanLocal(project, libs);
-    const configured = this.assembleCard(scan, libs.build, null).card.data?.extensions?.world || null;
+    const built = this.assembleCard(scan, libs.build, null);
+    const configured = built.card.data?.extensions?.world || null;
+    const desiredWorld = configured || (built.bookCount > 0 ? (built.card.data?.character_book?.name || project.name) : null);
     const free = (base, taken) => { for (let i = 1; ; i++) { const name = i === 1 ? base : `${base} ${i}`; if (!taken.has(name.toLowerCase())) return name; } };
     const cards = new Set(this.listCards().map(c => c.name.toLowerCase()));
     const worlds = new Set(this.listWorlds().map(w => w.worldName.toLowerCase()));
     const cardFile = `${free(project.name, cards)}.png`;
-    const worldName = configured ? free(configured, worlds) : null;
+    const worldName = desiredWorld ? free(desiredWorld, worlds) : null;
     return { cardFile, worldName, worldOverride: worldName && worldName !== configured ? worldName : null };
   }
   // 封面：工程里的 character.png，其次原来那张卡的图，都没有时用一张空白图
