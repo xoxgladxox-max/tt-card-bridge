@@ -142,9 +142,19 @@ test('automatic round only lists changes; nothing is written until the author co
   assert.equal(preview.times, null);
   await service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] });
   assert.equal(adapter.remote, 'local'); assert.equal(adapter.base, slotHash('local'));
-  // 两边一致后自动轮只更新基线记录
-  const pushes = adapter.pushes, r = await service.batch('sync', undefined, true);
-  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.pushes, pushes);
+  const pushes = adapter.pushes; let r = await service.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.pushes, pushes);  // 两边一致后进入持续连着状态：只改一边的自动同步，不再问
+  adapter.node = 'live edit';
+  r = await service.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.remote, 'live edit');
+  // 断开（暂停）期间的改动：重连后第一轮列清单等确认
+  await service.control({ action: 'pause' }); adapter.remote = 'offline edit'; await service.control({ action: 'resume' });
+  r = await service.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'needsConfirm'); assert.equal(adapter.node, 'live edit');
+  // 后台重启同样算重连
+  const restarted = new SyncService({ cardsRoot: service.cardsRoot, runtimeRoot: service.runtimeRoot, adapter });
+  r = await restarted.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'needsConfirm'); assert.equal(adapter.node, 'live edit');
 });
 test('conflicts get no suggestion; whole-card choice takes one side after the list is shown', async t => {
   for (const [whole, expected] of [['project', 'mine'], ['tavern', 'theirs']]) {

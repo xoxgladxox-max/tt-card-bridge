@@ -53,7 +53,7 @@ export class SyncService {
     this.cardsRoot = path.resolve(cardsRoot); this.runtimeRoot = runtimeRoot; this.adapter = adapter; this.adapter.cardsRoot ??= this.cardsRoot; this.engine = new SyncEngine(adapter); this.now = now; this.onShutdown = onShutdown; this.onCardsRootChange = onCardsRootChange;
     this.stateFile = path.join(runtimeRoot, 'service.json');
     this.state = normalizeState(readJson(this.stateFile, {}));
-    this.queue = new SerialQueue(); this.stableProjects = new Map(); this.logs = []; this.results = new Map(); this.previews = new Map(); this.timer = null; this.stopping = false;
+    this.queue = new SerialQueue(); this.stableProjects = new Map(); this.logs = []; this.results = new Map(); this.previews = new Map(); this.live = new Set(); this.timer = null; this.stopping = false;
   }
   // 工程连着的酒馆卡文件还在不在。玩家删卡重导后旧文件名会消失；适配器不会列卡时按存在处理
   cardExists(cardFile) {
@@ -160,10 +160,13 @@ export class SyncService {
       const result = compactResult(await this.engine.run(project, options));
       const prev = this.results.get(project.id);
       this.results.set(project.id, result);
+      // 两边一致 = 这张卡进入持续连着状态；之后只改一边的自动同步
+      if (result.status === 'clean') this.live.add(project.id); else this.live.delete(project.id);
       if (!options.automatic || result.changed || prev?.status !== result.status) this.record('sync', project.id, result);
       return { projectId: project.id, ...result };
     } catch (e) {
       const err = errorData(e);
+      this.live.delete(project.id);
       this.results.set(project.id, { status: 'error', error: err });
       this.record('sync', project.id, { error: err });
       throw e;
@@ -203,10 +206,11 @@ export class SyncService {
       const revision = this.adapter.localRevision(project);
       if (this.stableProjects.get(project.id) !== revision) { this.stableProjects.set(project.id, revision); return { projectId: project.id, status: 'waitingForStableFiles' }; }
     }
-    // 每轮只读比对（作者决定 2026-10-27：三方对比的处理都要作者确认）。
-    // 一致：只更新基线记录。有差异：记为「有改动待确认」，两边都不写，面板列清单等作者确认（resolve）
+    // 持续连着和断开后重连分开处理（作者决定 2026-10-27）：
+    //   这张卡一直连着（live）：只改了一边的照常自动同步；两边都改的停下等选
+    //   断开后重连（后台重启、暂停后恢复、切走又切回、上轮出错）：第一轮有差异就列清单等作者确认，确认前两边都不写
     const diff = await this.engine.inspect(project);
-    if (!diff.clean) {
+    if (!diff.clean && !this.live.has(project.id)) {
       const prev = this.results.get(project.id);
       const pending = { status: 'needsConfirm', diff: compactDiff(diff) };
       this.results.set(project.id, pending);
@@ -248,6 +252,8 @@ export class SyncService {
     if (!body || typeof body.action !== 'string') fail('INVALID_ACTION', '缺少 action', 400);
     // A pause request is immediate. All other operations join one queue; no forced cancellation.
     if (body.action === 'pause' || body.action === 'resume') {
+      // 暂停即断开：恢复后按重连处理
+      if (body.action === 'pause') this.live.clear();
       this.state.paused = body.action === 'pause'; this.saveState(); this.record(body.action, null, {}); return this.status();
     }
     if (body.action === 'followCard') {
@@ -256,6 +262,8 @@ export class SyncService {
       this.state.activeCardFile = cardFile;
       if (body.worldName !== undefined) this.state.activeWorldName = typeof body.worldName === 'string' && body.worldName.trim() ? body.worldName.trim() : null;
       const active = this.activeTargets();
+      // 不再打开的卡算断开，切回来时按重连处理
+      for (const id of [...this.live]) if (!active.some(p => p.id === id)) this.live.delete(id);
       const activeCard = active.find(p => p.targetKind !== 'world') ?? null;
       // 旧版切卡时会把其他卡写成暂停；切回来时只解开当前这张（恢复未完成的不动）
       if (activeCard?.paused && !activeCard.restoreRequired) this.writeBinding(activeCard, { paused: false });
@@ -284,6 +292,7 @@ export class SyncService {
       if (typeof body.paused !== 'boolean') fail('INVALID_ACTION', 'paused 必须是布尔值', 400);
       const p = this.getProject(body.projectId);
       if (!body.paused && p.restoreRequired) fail('RESTORE_REQUIRED', '完整恢复未完成，不能恢复自动同步');
+      if (body.paused) this.live.delete(p.id);
       this.writeBinding(p, { paused: body.paused }); return this.publicProject(this.getProject(p.id));
     }
     return this.queue.run({ action: body.action, projectId: body.projectId ?? null }, async () => {
@@ -530,6 +539,7 @@ export class SyncService {
           this.cardsRoot = resolved;
           this.adapter.cardsRoot = resolved;
           this.stableProjects.clear();
+          this.live.clear();
           this.results.clear();
           this.previews.clear();
           this.onCardsRootChange?.(resolved);
