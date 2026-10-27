@@ -432,8 +432,20 @@ export function mountSettings({ client, getContext }) {
         const box = find('diff');
         box.replaceChildren();
         const changed = (diff.slots ?? []).filter(slot => slot.kind !== 'equal');
-        box.append(element('p', diff.clean ? '工程与酒馆一致。' : `有 ${changed.length + (diff.issues?.length ?? 0)} 处改动待确认，确认前两边都不写。修改时间只作参考；酒馆的时间是整张卡或整本世界书文件的。提交前后台会再查一次两边是否又变了。`));
-        for (const issue of diff.issues ?? []) box.append(element('p', issue.message, 'ttcb-warning'));
+        // 同一原因只占一行（如「18 条条目设置不同：comment」），点开看是哪几条；正文不同的条目仍逐条列在下面
+        const groups = new Map();
+        for (const issue of diff.issues ?? []) {
+            const group = groups.get(issue.message) ?? { message: issue.message, labels: [] };
+            if (issue.key) group.labels.push(diff.slots?.find(slot => slot.key === issue.key)?.label ?? issue.key);
+            groups.set(issue.message, group);
+        }
+        box.append(element('p', diff.clean ? '工程与酒馆一致。' : `有 ${changed.length + groups.size} 项改动待确认，确认前两边都不写。`, undefined));
+        for (const group of groups.values()) {
+            if (group.labels.length < 2) { box.append(element('p', group.labels.length ? `${group.message}（${group.labels[0]}）` : group.message, 'ttcb-warning')); continue; }
+            const fold = element('details');
+            fold.append(element('summary', `${group.labels.length} 条${group.message}`, 'ttcb-warning'), element('small', group.labels.join('、')));
+            box.append(fold);
+        }
         const tavernTime = key => key.startsWith('entry:') && diff.times?.world ? diff.times.world : diff.times?.card;
         const choices = [];
         for (const slot of changed) {
