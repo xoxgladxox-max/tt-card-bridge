@@ -621,7 +621,24 @@ export function mountSettings({ client, getContext }) {
             const data = response.ok ? await response.json() : null;
             if (!data || data.error || data.file_name === undefined) throw new Error(`酒馆导入失败：${response.status} ${data?.error ?? response.statusText}`);
             await ctx.getCharacters?.();
-            importNote(`已导入为新卡「${data.file_name}」。卡里带的世界书，第一次打开这张卡时酒馆会问是否导入。`);
+            // 酒馆导入只把世界书留在卡里，要作者另点「导入卡内世界书」才生成。这里按酒馆同一做法直接生成并连上：
+            // 每次导入都新建一本，重名时加「 (n)」，不覆盖已有的世界书
+            const st = getContext(), avatar = `${data.file_name}.png`;
+            const chid = st.characters.findIndex(c => c.avatar === avatar);
+            const book = chid >= 0 ? st.characters[chid]?.data?.character_book : null;
+            let worldNote = "卡里没有世界书。";
+            if (book?.entries?.length) {
+                if (typeof st.convertCharacterBook !== "function" || typeof st.saveWorldInfo !== "function" || typeof st.writeExtensionField !== "function") throw new Error(`已导入新卡「${data.file_name}」，但当前酒馆没有生成世界书的接口；请在角色面板「更多…」里点「导入卡内世界书」。`);
+                const names = new Set((st.getWorldInfoNames?.() ?? []).map(n => n.toLowerCase()));
+                const base = book.name || st.characters[chid].data?.extensions?.world || `${st.characters[chid].name}的世界书`;
+                let worldName = base;
+                for (let i = 1; names.has(worldName.toLowerCase()); i++) worldName = `${base} (${i})`;
+                await st.saveWorldInfo(worldName, st.convertCharacterBook(book), true);
+                await st.writeExtensionField(chid, "world", worldName);
+                await st.updateWorldInfoList?.();
+                worldNote = `世界书「${worldName}」（${book.entries.length} 条）已生成并连到这张卡。`;
+            }
+            importNote(`已导入为新卡「${data.file_name}」。${worldNote}`);
         },
         rebind: async () => {
             const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
