@@ -97,10 +97,12 @@ test('pause lets an in-flight write finish and blocks future automatic work', as
   adapter.beforePush = async () => { entered(); await gate; };
   await service.control({ action: 'followCard', cardFile: 'A.png' });
   await service.control({ action: 'resume' });
-  const task = service.queue.run('automatic', () => service.batch('sync', undefined, true));
+  // 写入只在作者确认后发生：确认中的写入不被暂停打断
+  const preview = await service.control({ action: 'diff', projectId: 'A' });
+  const task = service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] });
   await started; await service.control({ action: 'pause' }); assert.equal(adapter.remote, 'base'); release(); await task;
-  assert.equal(adapter.remote, 'local'); adapter.node = 'later';
-  await service.batch('sync', undefined, true); assert.equal(adapter.remote, 'local');
+  assert.equal(adapter.remote, 'local'); adapter.node = 'later'; adapter.beforePush = null;
+  assert.deepEqual((await service.batch('sync', undefined, true)).results, []); assert.equal(adapter.remote, 'local');
   await service.control({ action: 'projectPause', projectId: 'A', paused: true }); await service.control({ action: 'resume' });
   await service.batch('sync', undefined, true); assert.equal(adapter.remote, 'local');
 });
@@ -121,7 +123,45 @@ test('automatic sync touches only the card open in the tavern; no open card mean
   assert.deepEqual((await service.batch('sync', undefined, true)).results, []); assert.equal(adapter.pushes, 0);
   await service.control({ action: 'followCard', cardFile: 'A.png' });
   const result = await service.batch('sync', undefined, true);
-  assert.deepEqual(result.results.map(r => r.projectId), ['A']); assert.equal(adapter.remote, 'local');
+  assert.deepEqual(result.results.map(r => r.projectId), ['A']); assert.equal(result.results[0].status, 'needsConfirm'); assert.equal(adapter.remote, 'base');
+});
+test('automatic round only lists changes; nothing is written until the author confirms', async t => {
+  const { service, adapter } = serviceFixture(t); adapter.node = 'local';
+  await service.control({ action: 'followCard', cardFile: 'A.png' }); await service.control({ action: 'resume' });
+  for (let i = 0; i < 3; i++) {
+    const r = await service.batch('sync', undefined, true);
+    assert.equal(r.results[0].status, 'needsConfirm');
+    assert.deepEqual(r.results[0].diff.changedSlots.map(s => s.kind), ['project']);
+  }
+  assert.equal(adapter.writes + adapter.pushes + adapter.saved + adapter.backupsTaken, 0);
+  assert.equal(service.logs.filter(l => l.action === 'needsConfirm').length, 1);
+  assert.equal((await service.status()).projects[0].status, 'needsConfirm');
+  // 清单给出建议；空 choices = 全部按建议
+  const preview = await service.control({ action: 'diff', projectId: 'A' });
+  assert.equal(preview.slots.find(s => s.key === 'field:description').suggest, 'project');
+  assert.equal(preview.times, null);
+  await service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] });
+  assert.equal(adapter.remote, 'local'); assert.equal(adapter.base, slotHash('local'));
+  // 两边一致后自动轮只更新基线记录
+  const pushes = adapter.pushes, r = await service.batch('sync', undefined, true);
+  assert.equal(r.results[0].status, 'clean'); assert.equal(adapter.pushes, pushes);
+});
+test('conflicts get no suggestion; whole-card choice takes one side after the list is shown', async t => {
+  for (const [whole, expected] of [['project', 'mine'], ['tavern', 'theirs']]) {
+    const { service, adapter } = serviceFixture(t); adapter.node = 'mine'; adapter.remote = 'theirs';
+    let preview = await service.control({ action: 'diff', projectId: 'A' });
+    assert.equal(preview.slots[0].kind, 'conflict'); assert.equal(preview.slots[0].suggest, null);
+    await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, choices: [] }), e => e.code === 'CONFLICT');
+    assert.equal(adapter.writes + adapter.pushes, 0);
+    await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, wholeCard: 'both' }), e => e.code === 'INVALID_CHOICE');
+    // 清单之后内容又变了：不写
+    adapter.remote = 'newer';
+    await assert.rejects(service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, wholeCard: whole }), e => e.code === 'STALE_PREVIEW');
+    adapter.remote = 'theirs';
+    preview = await service.control({ action: 'diff', projectId: 'A' });
+    await service.control({ action: 'resolve', projectId: 'A', previewId: preview.previewId, wholeCard: whole });
+    assert.equal(adapter.node, expected); assert.equal(adapter.remote, expected); assert.ok(adapter.backupsTaken >= 1);
+  }
 });
 test('card and skill jobs share FIFO and cannot overwrite active or duplicate IDs', () => {
   const q = new JobQueue(); q.publish('card', { id: 'one' }); q.publish('skills', { id: 'two' }); q.publish('card', { id: 'three' });

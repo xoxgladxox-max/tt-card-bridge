@@ -6,8 +6,10 @@ const statusLabels = {
     paused: '已暂停', unattached: '未接入', pending: '仍有未同步内容',
     operationPending: '写入结果待确认', reviewRequired: '需要人工复核',
     restoreRequired: '恢复未完成', bindingConflict: '存在重复绑定', waitingForStableFiles: '等待文件稳定',
-    cardMissing: '连着的卡已不在酒馆里',
+    cardMissing: '连着的卡已不在酒馆里', needsConfirm: '有改动待确认',
 };
+const suggestLabels = { project: '建议用工程（只有工程改了）', tavern: '建议用酒馆（只有酒馆改了）' };
+const timeText = iso => iso ? new Date(iso).toLocaleString() : '未知';
 const differenceLabels = { project: '工程有修改', tavern: '酒馆有修改', conflict: '双方修改冲突', added: '酒馆新增或工程缺少', removed: '工程新增或酒馆缺少' };
 function element(tag, content, className) {
     const node = document.createElement(tag);
@@ -214,6 +216,14 @@ export function mountSettings({ client, getContext }) {
     // 自动同步遇到两边都改过的内容时，列出正文冲突让作者选；结构/槽位差异只列简短摘要，不塞满屏文本框
     async function showConflictIfAny() {
         const p = selectedProject();
+        // 自动轮发现改动：列清单等作者确认；同一版本只展开一次
+        if (p?.status === 'needsConfirm') {
+            const sig = `${p.id}|needsConfirm|${p.lastResult?.diff?.revision ?? ''}`;
+            if (conflictShownFor === sig || busy) return;
+            conflictShownFor = sig;
+            try { showDiff(await client.control('diff', { projectId: p.id }), p.id); } catch (error) { showError(error); }
+            return;
+        }
         const err = p?.lastResult?.error;
         const code = err?.code;
         if (!p || !['CONFLICT', 'TAVERN_CHANGED', 'UNSUPPORTED_DIFFERENCE'].includes(code)) return;
@@ -412,13 +422,15 @@ export function mountSettings({ client, getContext }) {
     function showDiff(diff, projectId) {
         const box = find('diff');
         box.replaceChildren();
-        box.append(element('p', diff.clean ? '工程与酒馆一致。' : '预览已生成；提交前后台会再次检查两侧是否变化。'));
+        const changed = (diff.slots ?? []).filter(slot => slot.kind !== 'equal');
+        box.append(element('p', diff.clean ? '工程与酒馆一致。' : `有 ${changed.length + (diff.issues?.length ?? 0)} 处改动待确认，确认前两边都不写。修改时间只作参考；酒馆的时间是整张卡或整本世界书文件的。提交前后台会再查一次两边是否又变了。`));
         for (const issue of diff.issues ?? []) box.append(element('p', issue.message, 'ttcb-warning'));
+        const tavernTime = key => key.startsWith('entry:') && diff.times?.world ? diff.times.world : diff.times?.card;
         const choices = [];
-        for (const slot of diff.slots ?? []) {
-            if (slot.kind === 'equal') continue;
+        for (const slot of changed) {
             const row = element('div', undefined, 'ttcb-slot');
-            row.append(element('b', `${slot.label ?? slot.key} · ${differenceLabels[slot.kind] ?? slot.kind}`));
+            row.append(element('b', `${slot.label ?? slot.key} · ${differenceLabels[slot.kind] ?? slot.kind}${slot.suggest ? ` · ${suggestLabels[slot.suggest]}` : slot.kind === 'conflict' ? ' · 两边都改了，必须选' : ''}`));
+            if (diff.times) row.append(element('small', `工程文件：${timeText(diff.times.local?.[slot.key])}${slot.relPath ? `（${slot.relPath}）` : ''} · 酒馆：${timeText(tavernTime(slot.key))}`));
             const sides = element('div', undefined, 'ttcb-sides');
             sides.append(labeled('工程', readOnlyText(slot.node)), labeled('酒馆', readOnlyText(slot.tavern)));
             row.append(sides);
@@ -427,23 +439,42 @@ export function mountSettings({ client, getContext }) {
                 for (const [value, label] of [['', '请选择保留内容'], ['project', '使用工程正文'], ['tavern', '使用酒馆正文'], ['manual', '手动填写正文']]) {
                     const option = element('option', label); option.value = value; select.append(option);
                 }
+                // 只是预选建议，仍要作者点确认才写
+                if (slot.suggest) select.value = slot.suggest;
                 const manual = element('textarea'); manual.rows = 6; manual.hidden = true;
                 select.addEventListener('change', () => { manual.hidden = select.value !== 'manual'; });
                 row.append(labeled('处理方式', select), manual);
-                choices.push({ key: slot.key, select, manual });
-            } else row.append(element('p', '此项涉及设置或结构，不能在正文选边中处理。', 'ttcb-warning'));
+                choices.push({ key: slot.key, label: slot.label ?? slot.key, select, manual });
+            } else if (slot.suggest) row.append(element('p', `此项是条目或开场白的新增，确认后按建议写入（${slot.suggest === 'project' ? '推到酒馆' : '写回工程'}）。`));
+            else row.append(element('p', '此项涉及设置或结构，不能在正文选边中处理；可用下方「整卡以文件为准」，或「拆解当前卡」覆盖。', 'ttcb-warning'));
             box.append(row);
         }
-        if (choices.length) box.append(serviceButton('应用所选正文', async () => {
-            if (choices.some(c => !c.select.value)) throw new Error('请为每个可处理项目选择保留内容。');
-            const backupOpts = overwriteBackupOptions('冲突选边覆盖');
+        if (diff.clean) return;
+        const backupNote = () => find('backup-before-overwrite').checked ? '写前先备份。' : '已关闭覆盖前备份，写后无法找回。';
+        const listOf = items => `${items.slice(0, 20).join('\n')}${items.length > 20 ? `\n…共 ${items.length} 项` : ''}`;
+        const done = message => { box.replaceChildren(element('p', message)); conflictShownFor = ''; };
+        const actionsRow = element('div', undefined, 'flex-container');
+        actionsRow.append(serviceButton('确认写入所选', async () => {
+            if (choices.some(c => !c.select.value)) throw new Error('请为每一项选择保留内容。');
+            const sideText = { project: '用工程', tavern: '用酒馆', manual: '手写' };
+            const lines = [...choices.map(c => `· ${c.label}：${sideText[c.select.value]}`), ...changed.filter(s => !s.canResolve && s.suggest).map(s => `· ${s.label}：${s.suggest === 'project' ? '推到酒馆' : '写回工程'}`)];
+            if (!confirmAction(`将写入以下 ${lines.length} 项：\n${listOf(lines)}\n\n${backupNote()}继续？`)) return;
             await client.control('resolve', {
                 projectId, previewId: diff.previewId,
                 choices: choices.map(c => ({ key: c.key, source: c.select.value, ...(c.select.value === 'manual' ? { text: c.manual.value } : {}) })),
-                ...backupOpts,
+                ...overwriteBackupOptions(),
             });
-            box.replaceChildren(element('p', '已应用所选正文。再次查看差异可检查当前结果。'));
+            done('已按所选写入，并复核一致。');
         }));
+        const whole = (side, label) => serviceButton(label, async () => {
+            const items = changed.map(s => `· ${s.label ?? s.key}（${differenceLabels[s.kind] ?? s.kind}）`).concat((diff.issues ?? []).map(i => `· ${i.message}`));
+            const what = side === 'project' ? '以下各项都改成工程文件的版本，并把整张卡推到酒馆' : '以下各项都改成酒馆的版本，写回工程文件';
+            if (!confirmAction(`${label}：${what}。\n${listOf(items)}\n\n${backupNote()}继续？`)) return;
+            await client.control('resolve', { projectId, previewId: diff.previewId, wholeCard: side, ...overwriteBackupOptions() });
+            done(`已${label}，并复核一致。`);
+        });
+        actionsRow.append(whole('project', '整卡以文件为准'), whole('tavern', '整卡以酒馆为准'));
+        box.append(actionsRow);
     }
     async function showBackups(projectId) {
         const result = await client.control('backups', { projectId });

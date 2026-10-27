@@ -41,7 +41,9 @@ export function compareSnapshot(snapshot) {
       }
     }
     if (kind === 'added' || kind === 'removed') issues.push({ kind, key, message: `${kind === 'added' ? '酒馆新增或工程缺少' : '酒馆删除或工程新增'}槽位：${n?.label ?? t?.label}` });
-    slots.push({ key, label: n?.label ?? t?.label ?? key, node: n?.value ?? null, tavern: t?.value ?? null, kind, canResolve: extra || (!!n && !!t), ...(newEntry ? { newEntry: true } : {}), ...(remoteNewEntry ? { remoteNewEntry: true } : {}), ...(settingsChanged ? { settingsChanged } : {}), ...(extra ? { extra: true } : {}) });
+    // suggest：只改了一边时建议用改动的那边；两边都改的不给建议。只是建议，写入前都要作者确认
+    const relPath = n?.relPath ? String(n.relPath).split('\\').join('/') : null;
+    slots.push({ key, label: n?.label ?? t?.label ?? key, node: n?.value ?? null, tavern: t?.value ?? null, kind, suggest: kind === 'project' || kind === 'tavern' ? kind : null, relPath, canResolve: extra || (!!n && !!t), ...(newEntry ? { newEntry: true } : {}), ...(remoteNewEntry ? { remoteNewEntry: true } : {}), ...(settingsChanged ? { settingsChanged } : {}), ...(extra ? { extra: true } : {}) });
   }
   return { revision: snapshot.revision, clean: !issues.length && slots.every(s => s.kind === 'equal'), slots, issues, idAssignments: (snapshot.idAssignments ?? []).map(({ relPath, id, uid }) => ({ relPath, id, uid })) };
 }

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { discoverProjects, reservedTargets, targetOccupied, isSingleCardDirectory, sameProjectPath } from './projects.mjs';
-import { SyncEngine } from './sync-engine.mjs';
+import { SyncEngine, compareSnapshot } from './sync-engine.mjs';
 import { SerialQueue, contained, segment, readJson, atomicJson, fail, hashObject } from './safety.mjs';
 
 const compactDiff = diff => (!diff || typeof diff !== 'object' || !Array.isArray(diff.slots))
@@ -203,7 +203,18 @@ export class SyncService {
       const revision = this.adapter.localRevision(project);
       if (this.stableProjects.get(project.id) !== revision) { this.stableProjects.set(project.id, revision); return { projectId: project.id, status: 'waitingForStableFiles' }; }
     }
-    const result = await this.perform(project, { automatic: true });
+    // 每轮只读比对（作者决定 2026-10-27：三方对比的处理都要作者确认）。
+    // 一致：只更新基线记录。有差异：记为「有改动待确认」，两边都不写，面板列清单等作者确认（resolve）
+    const diff = await this.engine.inspect(project);
+    if (!diff.clean) {
+      const prev = this.results.get(project.id);
+      const pending = { status: 'needsConfirm', diff: compactDiff(diff) };
+      this.results.set(project.id, pending);
+      if (prev?.status !== 'needsConfirm' || prev.diff?.revision !== diff.revision) this.record('needsConfirm', project.id, { count: pending.diff.changedSlots.length + pending.diff.issues.length });
+      return { projectId: project.id, ...pending };
+    }
+    // previewRevision：比对后内容又变了就停下，不会把没列给作者看的改动写进去
+    const result = await this.perform(project, { automatic: true, previewRevision: diff.revision });
     if (this.adapter.localRevision) this.stableProjects.set(project.id, this.adapter.localRevision(project));
     return result;
   }
@@ -284,13 +295,30 @@ export class SyncService {
           return this.batch('sync', body.projectId, false, { direction, force: body.force ?? false, ...this.backupOptions(body) });
         }
         case 'diff': {
-          const p = this.getProject(body.projectId), diff = await this.engine.inspect(p);
-          return { projectId: p.id, ...diff, ...this.preview('diff', p, { revision: diff.revision }) };
+          // 改动清单：每项带建议（suggest）和两边修改时间（times，只作参考，不按时间选边）
+          const p = this.getProject(body.projectId), snap = await this.adapter.snapshot(p), diff = compareSnapshot(snap);
+          const times = this.adapter.fileTimes ? this.adapter.fileTimes(p, snap, diff.slots.filter(s => s.kind !== 'equal').map(s => s.key)) : null;
+          return { projectId: p.id, ...diff, times, ...this.preview('diff', p, { revision: diff.revision }) };
         }
         case 'resolve': {
+          // 作者看过清单（previewId）后确认：逐项 choices（可为空，其余按清单建议），或整卡 wholeCard = project / tavern
           const p = this.getProject(body.projectId), preview = this.takePreview(body.previewId, 'diff', p);
-          if (!Array.isArray(body.choices) || !body.choices.length) fail('INVALID_CHOICE', '请提供明确正文决定', 400);
-          const result = await this.perform(p, { previewRevision: preview.revision, choices: body.choices, ...this.backupOptions(body) });
+          const whole = body.wholeCard;
+          let options;
+          if (whole === 'project') options = { replaceRemote: true };
+          else if (whole === 'tavern') {
+            const diff = await this.engine.inspect(p);
+            if (diff.revision !== preview.revision) fail('STALE_PREVIEW', '预览后内容已改变，请重新查看清单');
+            // 结构差异、工程新增的条目、工程改了的条目设置不能靠正文选边取酒馆版
+            const blocked = [...diff.issues.map(i => i.message), ...diff.slots.filter(s => s.kind !== 'equal' && ((!s.canResolve && s.kind === 'project') || s.settingsChanged === 'project')).map(s => s.label)];
+            if (blocked.length) fail('UNSUPPORTED_DIFFERENCE', `以下差异不能按正文整卡取酒馆版：${blocked.slice(0, 8).join('；')}${blocked.length > 8 ? ' 等' : ''}。要整卡以酒馆为准，请点「拆解当前卡」覆盖（不进卡的文件会保留）`, 409);
+            options = { choices: diff.slots.filter(s => s.kind !== 'equal' && s.canResolve).map(s => ({ key: s.key, source: 'tavern' })) };
+          } else if (whole !== undefined) fail('INVALID_CHOICE', 'wholeCard 只能是 project 或 tavern', 400);
+          else {
+            if (!Array.isArray(body.choices)) fail('INVALID_CHOICE', '请提供决定（空数组表示全部按清单建议）', 400);
+            options = { choices: body.choices };
+          }
+          const result = await this.perform(p, { previewRevision: preview.revision, ...options, ...this.backupOptions(body) });
           this.previews.delete(body.previewId); return result;
         }
         case 'bindWorld': {

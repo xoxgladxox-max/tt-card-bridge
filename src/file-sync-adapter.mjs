@@ -603,6 +603,21 @@ export class FileSyncAdapter {
     if (configured && configured !== worldName) fail('BINDING_CONFLICT', '工程世界书名与CLI目标不同');
     if (!fs.existsSync(worldFilePath(worldName, this.userDir))) fail('WORLD_NOT_FOUND', '世界书不存在；不能自动覆盖其他目标');
   }
+  // 改动清单里的修改时间，只作参考。工程按条目文件算；酒馆只有整张卡 PNG 和整本世界书 JSON 的时间，不是单条的
+  fileTimes(project, snapshot, keys = null) {
+    const iso = file => { try { return fs.statSync(file).mtime.toISOString(); } catch { return null; } };
+    const local = {};
+    for (const [key, slot] of Object.entries(snapshot.nodes?.slots ?? {})) {
+      if (keys && !keys.includes(key)) continue;
+      if (!slot.relPath) continue;
+      try { local[key] = iso(contained(project.dir, String(slot.relPath).split(path.sep).join('/'))); } catch { local[key] = null; }
+    }
+    const worldOnly = project.cardFile.startsWith('world:');
+    let card = null, world = null;
+    if (!worldOnly) { try { card = iso(contained(path.join(this.userDir, 'characters'), project.cardFile)); } catch { /* 无效文件名不显示时间 */ } }
+    if (snapshot.worldName) { try { world = iso(worldFilePath(snapshot.worldName, this.userDir)); } catch { /* 同上 */ } }
+    return { local, card, world };
+  }
   // 覆盖拆解时怎么处理旧工程：卡内容文件（与同步、装卡同一口径的 nodeFiles）按酒馆当前内容重新生成，
   // 其余文件（记录/、候选/、待归位/、note/、调研.md、封面等）原样搬进新工程。.card-forge/ 是同步记录，重新建立
   overwritePlan(dir) {
