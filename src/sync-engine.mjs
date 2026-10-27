@@ -53,7 +53,7 @@ export const nodeSignature = (snapshot, updates = []) => {
 export class SyncEngine {
   constructor(adapter) { this.adapter = adapter; }
   async inspect(project) { return compareSnapshot(await this.adapter.snapshot(project)); }
-  async run(project, { direction = 'both', previewRevision, choices, force = false, replaceRemote = false, initializeExpected, skipBackup = false, acceptDataLossRisk = false, backupDir = '' } = {}) {
+  async run(project, { direction = 'both', previewRevision, choices, force = false, replaceRemote = false, initializeExpected, skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep } = {}) {
     if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖前，必须勾选确认自行承担数据丢失责任', 400);
     await this.adapter.assertAvailable?.(project);
     let before = await this.adapter.snapshot(project);
@@ -95,7 +95,7 @@ export class SyncEngine {
       }
       if ((value !== s.tavern || pushSettings) && direction !== 'pull') needsPush = true;
     }
-    const backupId = skipBackup ? null : await this.adapter.backup(project, before, { backupDir });
+    const backupId = skipBackup ? null : await this.adapter.backup(project, before, { backupDir, backupKeep });
     // Recheck after backing up, before the first mutation. Transport also checks expected remote data.
     if ((await this.adapter.snapshot(project)).revision !== before.revision) fail('STALE_PREVIEW', '备份时内容改变；没有写入');
     const plannedNodes = nodeSignature(before, updates);

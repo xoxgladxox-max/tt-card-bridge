@@ -6,6 +6,7 @@ const statusLabels = {
     paused: '已暂停', unattached: '未接入', pending: '仍有未同步内容',
     operationPending: '写入结果待确认', reviewRequired: '需要人工复核',
     restoreRequired: '恢复未完成', bindingConflict: '存在重复绑定', waitingForStableFiles: '等待文件稳定',
+    cardMissing: '连着的卡已不在酒馆里',
 };
 const differenceLabels = { project: '工程有修改', tavern: '酒馆有修改', conflict: '双方修改冲突', added: '酒馆新增或工程缺少', removed: '工程新增或酒馆缺少' };
 function element(tag, content, className) {
@@ -83,7 +84,14 @@ export function mountSettings({ client, getContext }) {
             ${icon('set-cards-root', 'fa-folder-open', '切换工作区目录', '拆卡、同步、合成和 Agent 读写都在这个目录里')}
           </div>
           <div class="ttcb-backup-policy">
-            <label class="checkbox_label"><input data-role="backup-before-overwrite" type="checkbox" checked><small>每次覆盖写入前自动备份（常驻开关；关闭后直接覆盖需自担数据丢失责任）</small></label>
+            <label class="checkbox_label"><input data-role="backup-before-overwrite" type="checkbox" checked><small>每次覆盖写入前自动备份（常驻开关；关闭时确认一次，之后所有覆盖都直接执行，不再逐次询问）</small></label>
+            <small data-role="backup-off-note" class="ttcb-warning" hidden>已关闭覆盖前备份：覆盖后无法恢复旧版本。</small>
+            <div class="flex-container">
+              <small>每张卡只保留最近</small>
+              <input data-role="backup-keep" type="number" min="0" max="1000" step="1" value="5" class="text_pole" style="width:5em" aria-label="每张卡保留的备份份数">
+              <small>份备份（0 = 全部保留）</small>
+              ${icon('set-backup-keep', 'fa-broom', '保存份数', '超过份数时自动删除更早的备份；只删工具自己生成的备份')}
+            </div>
             <div class="flex-container">
               <input data-role="backup-dir" type="text" class="flex1" placeholder="自定义备份位置（留空默认保存在 工作区目录\\backups\\&lt;卡名&gt;\\ 下）" aria-label="自定义备份位置" autocomplete="off">
               ${icon('set-backup-dir', 'fa-floppy-disk', '保存备份位置', '保存默认自定义备份文件夹路径')}
@@ -110,6 +118,7 @@ export function mountSettings({ client, getContext }) {
           <small data-role="project-status"></small>
           <div class="flex-container">
             ${icon('import-workspace', 'fa-file-import', '合成并导入酒馆', '把工作区里的卡合成后写进酒馆（新卡会新建）')}
+            ${icon('rebind', 'fa-link', '改连当前打开的卡', '把这个卡工程改为连接酒馆里当前打开的卡（删卡重导后用）；只改连接，不写卡也不改文件')}
             ${icon('backups', 'fa-clock-rotate-left', '备份', '查看这张卡的备份')}
           </div>
           <div data-role="diff"></div>
@@ -240,29 +249,31 @@ export function mountSettings({ client, getContext }) {
         action('import-workspace').disabled = busy || !state || !project;
         action('backups').disabled = busy || !project?.attached;
         const card = currentCard();
+        action('rebind').disabled = busy || !state || !project || project.targetKind === 'world' || !card?.avatar || project.cardFile?.toLowerCase() === card.avatar.toLowerCase();
         if (project) {
             const errMsg = project.status === 'error' && project.lastResult?.error?.message ? `（${project.lastResult.error.message}）` : '';
-            find('project-status').textContent = `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? '已连接酒馆' : '还没进酒馆（点「合成并导入酒馆」）'} · ${statusLabels[project.status] ?? project.status ?? '状态未知'}${errMsg}${project.pendingOperation ? `；未决任务：${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`;
+            const missMsg = project.status === 'cardMissing' ? `（原来连的「${project.missingCardFile ?? project.cardFile}」已不在酒馆里；打开要连的卡后点「改连当前打开的卡」，或点「合成并导入酒馆」重新导入）` : '';
+            find('project-status').textContent = `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? '已连接酒馆' : '还没进酒馆（点「合成并导入酒馆」）'} · ${statusLabels[project.status] ?? project.status ?? '状态未知'}${errMsg}${missMsg}${project.pendingOperation ? `；未决任务：${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`;
         } else if (card) {
             find('project-status').textContent = `当前卡「${card.name}」还没拆到工作区（点上方「拆解当前卡」）`;
         } else {
             find('project-status').textContent = '未选择卡';
         }
+        // 后台正在跟的卡和酒馆当前打开的卡对不上时直接说出来
+        const followGap = card?.avatar && state && (state.activeCardFile ?? '').toLowerCase() !== card.avatar.toLowerCase()
+            ? `；后台正在跟「${state.activeCardFile ?? '没有卡'}」，和当前打开的卡不一致，点「刷新」重新对上`
+            : '';
         const cardMatched = card && (state?.projects ?? []).find(p => p.cardFile && p.cardFile.toLowerCase() === card.avatar?.toLowerCase());
         find('current-card').textContent = card
-            ? `酒馆当前卡：${card.name}（${card.avatar}） · ${cardMatched ? `已拆到工作区「${cardMatched.id}」` : '还没拆到工作区'}`
+            ? `酒馆当前卡：${card.name}（${card.avatar}） · ${cardMatched ? `已拆到工作区「${cardMatched.id}」` : '还没拆到工作区'}${followGap}`
             : '先在酒馆选择一张角色卡；群聊中不能拆解当前卡。';
         // Preview-specific controls also need a live service, not just a loaded extension.
         for (const node of root.querySelectorAll('[data-service-action]')) node.disabled = busy || !state;
     }
-    function overwriteBackupOptions(operationLabel = '本次覆盖操作') {
-        const skipBackup = !find('backup-before-overwrite').checked;
+    // 备份按常驻设置执行：关闭时已在开关处确认过一次，这里不再逐次询问，也不替后台决定跳过备份
+    function overwriteBackupOptions() {
         const backupDir = find('backup-dir').value.trim();
-        if (skipBackup) {
-            const ok = confirmAction(`当前已关闭「覆盖写入前自动备份」。\n\n执行「${operationLabel}」将直接覆盖目标数据，一旦出错无法找回，数据丢失责任由本人自行承担。\n\n是否确认不备份直接覆盖？`);
-            if (!ok) throw new Error('已取消直接覆盖操作（可重新勾选「每次覆盖写入前自动备份」后再执行）。');
-        }
-        return { skipBackup, acceptDataLossRisk: skipBackup, ...(backupDir ? { backupDir } : {}) };
+        return backupDir ? { backupDir } : {};
     }
     function syncSelectionToCurrentCard() {
         const select = find('projects');
@@ -284,7 +295,9 @@ export function mountSettings({ client, getContext }) {
         if (state?.backupDir && !find('backup-dir').value) find('backup-dir').value = state.backupDir;
         if (state && typeof state.autoBackupBeforeOverwrite === 'boolean') {
             find('backup-before-overwrite').checked = state.autoBackupBeforeOverwrite;
+            find('backup-off-note').hidden = state.autoBackupBeforeOverwrite;
         }
+        if (state && Number.isInteger(state.backupKeep) && document.activeElement !== find('backup-keep')) find('backup-keep').value = String(state.backupKeep);
         const pool = state?.assembleProjects ?? state?.projects ?? [];
         const signature = JSON.stringify(pool.map(p => [p.id, p.name, p.cardFile, p.attached]));
         if (signature !== projectSignature) {
@@ -333,20 +346,28 @@ export function mountSettings({ client, getContext }) {
         renderControls();
         if (state) { scanCurrentCard(); showConflictIfAny(); }
     }
-    async function checkCardFollow() {
-        if (!state || busy || refreshing) return;
+    // 告诉后台酒馆当前打开的是哪张卡、哪本世界书。
+    // 后台确认收到后才记下；失败时清掉记录，下一秒的定时检查会重试。force：手动刷新等场合不管是否变化都重新告诉一次
+    let following = false;
+    async function checkCardFollow({ force = false } = {}) {
+        if (!state || following || (!force && (busy || refreshing))) return;
         const avatar = currentCard()?.avatar ?? null;
         const worldName = currentWorldName();
-        if (avatar === lastFollowedCard && worldName === lastFollowedWorld) return;
-        lastFollowedCard = avatar;
-        lastFollowedWorld = worldName;
+        if (!force && avatar === lastFollowedCard && worldName === lastFollowedWorld) return;
+        following = true;
         try {
             state = await client.control('followCard', { cardFile: avatar, worldName });
+            lastFollowedCard = avatar;
+            lastFollowedWorld = worldName;
             showError('');
             syncSelectionToCurrentCard();
             renderState();
         } catch (error) {
+            lastFollowedCard = undefined;
+            lastFollowedWorld = undefined;
             showError(error);
+        } finally {
+            following = false;
         }
     }
     async function refresh({ force = true } = {}) {
@@ -467,21 +488,15 @@ export function mountSettings({ client, getContext }) {
             const ok = confirmAction(
                 autoBackup
                     ? `本地已存在同名工程目录（${label}）。\n\n是否先将旧目录自动备份，再用酒馆当前内容覆盖接入？`
-                    : `本地已存在同名工程目录（${label}），且当前已关闭自动备份。\n\n继续操作将直接删除并覆盖本地同名工程目录，一旦出错无法找回，数据丢失责任由本人自行承担。\n\n是否确认直接覆盖接入？`,
+                    : `本地已存在同名工程目录（${label}），当前已关闭覆盖前备份。\n\n继续会直接覆盖本地同名工程目录，无法找回。\n\n是否覆盖接入？`,
             );
             if (!ok) throw error;
-            const backupDir = find('backup-dir').value.trim();
-            await client.control(actionName, {
-                ...payload,
-                overwrite: true,
-                skipBackup: !autoBackup,
-                acceptDataLossRisk: !autoBackup,
-                ...(backupDir ? { backupDir } : {}),
-            });
+            await client.control(actionName, { ...payload, overwrite: true, ...overwriteBackupOptions() });
         }
     }
     const actions = {
-        refresh: () => refresh(),
+        // 手动刷新：读状态，并把酒馆当前打开的卡重新告诉后台，漏掉的切卡在这里补上
+        refresh: async () => { await refresh(); await checkCardFollow({ force: true }); },
         toggle: async () => {
             if (state?.paused === false) return client.control('pause');
             find('status').textContent = '正在启动并连接同步后台…';
@@ -494,8 +509,7 @@ export function mountSettings({ client, getContext }) {
             const keep = keptExtras();
             await attachWithConflictPrompt('attach', { cardFile: card.avatar, keep }, card.name);
             if (state?.paused !== false) state = await client.control('resume');
-            lastFollowedCard = undefined;
-            await checkCardFollow();
+            await checkCardFollow({ force: true });
             find('diff').replaceChildren(element('p', `已把「${card.name}」拆到工作区「${card.avatar.replace(/\.png$/i, '')}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}，已开启实时双向同步。`));
         },
         'attach-world': async () => {
@@ -522,7 +536,7 @@ export function mountSettings({ client, getContext }) {
                         '覆盖并绑定同名卡', '另建新副本 / 取消',
                     );
                     if (over) {
-                        const backupOpts = overwriteBackupOptions(`用「${p.id}」覆盖酒馆同名卡`);
+                        const backupOpts = overwriteBackupOptions();
                         importNote('正在覆盖并绑定同名卡…');
                         res = await send({ overwrite: true, ...backupOpts });
                     } else {
@@ -539,6 +553,30 @@ export function mountSettings({ client, getContext }) {
             if (state?.paused !== false) state = await client.control('resume');
             const made = res?.project?.cardFile ? `（酒馆里的卡文件：${res.project.cardFile}）` : '';
             importNote(`已把「${p.id}」写入酒馆${made}，已开启实时双向同步。`);
+        },
+        rebind: async () => {
+            const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
+            const card = currentCard();
+            if (!p) throw new Error('先在下拉框选中要改连的卡工程。');
+            if (!card?.avatar) throw new Error('先在酒馆打开要连接的那张卡。');
+            const ok = confirmAction(`把卡工程「${p.id}」改为连接酒馆当前打开的「${card.name}」（${card.avatar}）？\n\n只改连接，不写卡、不改工程文件。两边一致就直接开始实时同步；不一致会列出差异让你选。`);
+            if (!ok) return;
+            const res = await client.control('rebind', { projectId: p.id, cardFile: card.avatar });
+            if (state?.paused !== false) state = await client.control('resume');
+            await checkCardFollow({ force: true });
+            if (res.clean) {
+                find('diff').replaceChildren(element('p', `已把「${p.id}」改连到「${card.avatar}」，两侧一致，已开启实时双向同步。`));
+            } else {
+                showDiff(await client.control('diff', { projectId: p.id }), p.id);
+                importNote(`已把「${p.id}」改连到「${card.avatar}」，但两边内容不同：请在下方逐项选择以哪边为准；结构差异大时可改用「拆解当前卡」或「合成并导入酒馆」整体覆盖。`, true);
+            }
+        },
+        'set-backup-keep': async () => {
+            const keep = Number(find('backup-keep').value);
+            if (!Number.isInteger(keep) || keep < 0 || keep > 1000) throw new Error('份数要填 0～1000 的整数（0 = 全部保留）。');
+            const res = await client.control('setBackupKeep', { keep });
+            find('backup-keep').value = String(res.backupKeep);
+            find('diff').replaceChildren(element('p', res.backupKeep ? `每张卡只保留最近 ${res.backupKeep} 份备份，下次备份时自动删除更早的。` : '已设为全部保留备份。'));
         },
         'set-cards-root': async () => {
             const cardsRoot = find('cards-root-input').value.trim();
@@ -611,6 +649,7 @@ export function mountSettings({ client, getContext }) {
             try {
                 const res = await client.control('setAutoBackup', { enabled, acceptDataLossRisk: !enabled });
                 state.autoBackupBeforeOverwrite = res.autoBackupBeforeOverwrite;
+                find('backup-off-note').hidden = res.autoBackupBeforeOverwrite;
             } catch (error) {
                 find('backup-before-overwrite').checked = !enabled;
                 showError(error);

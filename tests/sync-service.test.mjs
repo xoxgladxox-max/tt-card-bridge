@@ -486,3 +486,82 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   assert.match(fs.readFileSync(greet1Path, 'utf8'), /Hello from Tavern alt greeting!/);
 });
 
+
+// ---- 备份设置只确认一次、只保留最近 N 份、连着的卡被删后改连 ----
+test('auto-backup off is confirmed once in settings; later sync skips backup without asking again', async t => {
+  const { service, adapter } = serviceFixture(t);
+  await assert.rejects(service.control({ action: 'setAutoBackup', enabled: false }), e => e.code === 'CONFIRMATION_REQUIRED');
+  await service.control({ action: 'setAutoBackup', enabled: false, acceptDataLossRisk: true });
+  adapter.node = 'local';
+  const res = await service.control({ action: 'sync', projectId: 'A', direction: 'push' });
+  assert.equal(res.results[0].error, undefined);
+  assert.equal(adapter.remote, 'local');
+  assert.equal(adapter.backupsTaken, 0);
+});
+test('with auto-backup on, skipping backup for a single operation still needs its own confirmation', async t => {
+  const { service, adapter } = serviceFixture(t);
+  adapter.node = 'local';
+  const rejected = await service.control({ action: 'sync', projectId: 'A', direction: 'push', skipBackup: true });
+  assert.equal(rejected.results[0].error.code, 'CONFIRMATION_REQUIRED');
+  assert.equal(adapter.pushes, 0);
+  await service.control({ action: 'sync', projectId: 'A', direction: 'push' });
+  assert.equal(adapter.backupsTaken, 1);
+});
+test('backupKeep defaults to 5, rejects bad values, and is reported in status', async t => {
+  const { service } = serviceFixture(t);
+  assert.equal((await service.status()).backupKeep, 5);
+  await assert.rejects(service.control({ action: 'setBackupKeep', keep: -1 }), e => e.code === 'INVALID_ACTION');
+  await assert.rejects(service.control({ action: 'setBackupKeep', keep: 1.5 }), e => e.code === 'INVALID_ACTION');
+  assert.equal((await service.control({ action: 'setBackupKeep', keep: 0 })).backupKeep, 0);
+  assert.equal((await service.status()).backupKeep, 0);
+});
+test('pruneBackups keeps only the newest N stamped backups and never touches other folders', t => {
+  const root = temp(t);
+  const names = ['2026-10-01T00-00-00-000Z-aaaa1111', '2026-10-02T00-00-00-000Z-bbbb2222', '2026-10-03T00-00-00-000Z-cccc3333', '2026-10-04T00-00-00-000Z-接入前的工程', '作者手放的资料'];
+  for (const n of names) fs.mkdirSync(path.join(root, n), { recursive: true });
+  const ctx = { backupRoot: () => root };
+  assert.deepEqual(FileSyncAdapter.prototype.pruneBackups.call(ctx, {}, '', 0), []);
+  assert.equal(fs.readdirSync(root).length, 5);
+  const removed = FileSyncAdapter.prototype.pruneBackups.call(ctx, {}, '', 2);
+  assert.deepEqual(removed.sort(), [names[0], names[1]]);
+  assert.deepEqual(fs.readdirSync(root).sort(), [names[2], names[3], names[4]].sort());
+});
+test('deleted card: status says cardMissing, automatic sync records once and writes nothing, manual sync explains', async t => {
+  const adapter = new MemoryAdapter();
+  adapter.listCards = () => [{ cardFile: 'B.png', name: 'B' }];
+  const { service } = serviceFixture(t, adapter);
+  const p = (await service.status()).projects[0];
+  assert.equal(p.status, 'cardMissing');
+  assert.equal(p.missingCardFile, 'A.png');
+  service.state.activeCardFile = 'A.png'; service.state.paused = false;
+  adapter.node = 'local';
+  for (let i = 0; i < 3; i++) {
+    const r = await service.batch('sync', 'A', true);
+    assert.equal(r.results[0].status, 'cardMissing');
+  }
+  assert.equal(service.logs.filter(l => l.action === 'cardMissing').length, 1);
+  assert.equal(adapter.writes + adapter.pushes + adapter.saved + adapter.backupsTaken, 0);
+  const manual = await service.control({ action: 'sync', projectId: 'A' });
+  assert.equal(manual.results[0].error.code, 'CARD_MISSING');
+});
+test('rebind moves the project to the re-imported card; clean starts syncing, different only lists differences', async t => {
+  const adapter = new MemoryAdapter();
+  adapter.listCards = () => [{ cardFile: 'B.png', name: 'B' }];
+  const { dir, service } = serviceFixture(t, adapter);
+  await assert.rejects(service.control({ action: 'rebind', projectId: 'A', cardFile: 'C.png' }), e => e.code === 'CARD_NOT_FOUND');
+  const clean = await service.control({ action: 'rebind', projectId: 'A', cardFile: 'B.png' });
+  assert.equal(clean.clean, true);
+  assert.equal(clean.from, 'A.png');
+  const binding = JSON.parse(fs.readFileSync(path.join(dir, '.card-forge', 'bridge.json'), 'utf8'));
+  assert.equal(binding.cardFile, 'B.png');
+  assert.equal(binding.projectName, 'A');
+  assert.notEqual((await service.status()).projects[0].status, 'cardMissing');
+  adapter.remote = 'changed in tavern';
+  const pushesBefore = adapter.pushes, writesBefore = adapter.writes;
+  adapter.listCards = () => [{ cardFile: 'B.png', name: 'B' }, { cardFile: 'D.png', name: 'D' }];
+  const diff = await service.control({ action: 'rebind', projectId: 'A', cardFile: 'D.png' });
+  assert.equal(diff.clean, false);
+  assert.ok(diff.diff.changedSlots.length > 0);
+  assert.equal(adapter.pushes, pushesBefore);
+  assert.equal(adapter.writes, writesBefore);
+});

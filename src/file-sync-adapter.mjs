@@ -394,7 +394,7 @@ export class FileSyncAdapter {
     if (sameProjectPath(base, project.dir) || path.resolve(base).toLowerCase().startsWith(path.resolve(project.dir).toLowerCase() + path.sep)) fail('INVALID_BACKUP_DIR', '备份位置不能在工程文件夹里', 400);
     return path.join(base, name);
   }
-  async backup(project, snapshot, { backupDir = '' } = {}) {
+  async backup(project, snapshot, { backupDir = '', backupKeep } = {}) {
     const id = new Date().toISOString().replace(/[:.]/g, '-') + `-${crypto.randomUUID().slice(0, 8)}`;
     const dir = path.join(this.backupRoot(project, backupDir), id);
     fs.mkdirSync(dir, { recursive: true });
@@ -411,7 +411,20 @@ export class FileSyncAdapter {
       fs.mkdirSync(path.dirname(dst), { recursive: true });
       fs.writeFileSync(dst, text, 'utf8');
     }
+    this.pruneBackups(project, backupDir, backupKeep);
     return id;
+  }
+  // 只保留最近 keep 份。只动工具自己生成的、以时间戳开头的备份文件夹；作者自己放进去的东西不碰。keep 为 0 或没给时全部保留
+  pruneBackups(project, backupDir = '', keep) {
+    if (!Number.isInteger(keep) || keep <= 0) return [];
+    const root = this.backupRoot(project, backupDir);
+    if (!fs.existsSync(root)) return [];
+    const stamped = fs.readdirSync(root, { withFileTypes: true })
+      .filter(e => e.isDirectory() && /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z/.test(e.name))
+      .map(e => e.name).sort().reverse();
+    const removed = stamped.slice(keep);
+    for (const name of removed) fs.rmSync(path.join(root, name), { recursive: true, force: true });
+    return removed;
   }
   backups(project) {
     const root = this.backupRoot(project);
@@ -439,7 +452,7 @@ export class FileSyncAdapter {
     for (const rel of Object.keys(backup.pendingFiles)) { if (!rel.startsWith('待归位/')) fail('INVALID_BACKUP', '待归位备份路径无效'); contained(project.dir, rel); }
     return backup;
   }
-  async restore(project, backup, expectedRevision, { skipBackup = false, acceptDataLossRisk = false, backupDir = '' } = {}) {
+  async restore(project, backup, expectedRevision, { skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep } = {}) {
     if (skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖恢复前，必须勾选确认自行承担数据丢失责任', 400);
     const support = this.restoreSupport(project, backup);
     if (!support.canRestore) fail('UNSUPPORTED_RESTORE', support.blockedReason, 409);
@@ -448,7 +461,7 @@ export class FileSyncAdapter {
     if (current.revision !== expectedRevision) fail('STALE_PREVIEW', '恢复预览后内容改变');
     if (!backup.pngBase64) fail('UNSUPPORTED_BACKUP', '此备份不是完整角色卡备份');
     if (backup.worldName !== current.worldName) fail('UNSUPPORTED_RESTORE', '当前世界书绑定与备份不同；不能在未预览另一世界书时恢复');
-    const safetyBackupId = skipBackup ? null : await this.backup(project, current, { backupDir });
+    const safetyBackupId = skipBackup ? null : await this.backup(project, current, { backupDir, backupKeep });
     const result = await this.send(project, { id: crypto.randomUUID(), op: 'restore', avatar: project.cardFile, pngBase64: backup.pngBase64, worldName: backup.worldName, world: backup.worldRaw === null ? null : JSON.parse(backup.worldRaw), worldRaw: backup.worldRaw, expected: current.expected }, current);
     if (!result || result.fatal || result.restored !== true) fail('RESTORE_FAILED', result?.fatal ?? '酒馆未确认完整恢复；保持该卡暂停', 502);
     // PNG import may change host-owned metadata; body slots, author settings and world data may not.
@@ -588,7 +601,7 @@ export class FileSyncAdapter {
     if (configured && configured !== worldName) fail('BINDING_CONFLICT', '工程世界书名与CLI目标不同');
     if (!fs.existsSync(worldFilePath(worldName, this.userDir))) fail('WORLD_NOT_FOUND', '世界书不存在；不能自动覆盖其他目标');
   }
-  async attach(project, { overwrite = false, skipBackup = false, acceptDataLossRisk = false, backupDir = '', keep } = {}) {
+  async attach(project, { overwrite = false, skipBackup = false, acceptDataLossRisk = false, backupDir = '', backupKeep, keep } = {}) {
     await this.assertAvailable(project);
     if (fs.existsSync(project.dir) && !overwrite) fail('ATTACH_CONFLICT', '同名工程目录已存在；拒绝覆盖或自动接入');
     if (overwrite && skipBackup && acceptDataLossRisk !== true) fail('CONFIRMATION_REQUIRED', '不备份直接覆盖同名工程前，必须勾选确认自行承担数据丢失责任', 400);
@@ -635,6 +648,7 @@ export class FileSyncAdapter {
           const backupTarget = path.join(this.backupRoot(project, backupDir), `${stamp}-接入前的工程`);
           fs.mkdirSync(path.dirname(backupTarget), { recursive: true });
           fs.cpSync(project.dir, backupTarget, { recursive: true });
+          this.pruneBackups(project, backupDir, backupKeep);
         }
         fs.rmSync(project.dir, { recursive: true, force: true });
       }

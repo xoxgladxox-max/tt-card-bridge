@@ -18,7 +18,9 @@ const compactResult = res => (!res || typeof res !== 'object')
   ? res
   : { ...res, ...(res.diff ? { diff: compactDiff(res.diff) } : {}) };
 // service.json 的默认值。读取时先补缺、再逐字段校正，文件被手改坏或是旧版本写的都能用
-export const DEFAULT_STATE = Object.freeze({ paused: true, pollIntervalMs: 2000, backupDir: '', autoBackupBeforeOverwrite: true, activeCardFile: null, activeWorldName: null });
+// backupKeep：每张卡只保留最近几份备份，0 表示全部保留
+export const DEFAULT_STATE = Object.freeze({ paused: true, pollIntervalMs: 2000, backupDir: '', autoBackupBeforeOverwrite: true, backupKeep: 5, activeCardFile: null, activeWorldName: null });
+const validKeep = v => Number.isInteger(v) && v >= 0 && v <= 1000;
 const text = v => typeof v === 'string' && v.trim() ? v.trim() : null;
 export function normalizeState(raw) {
   const s = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
@@ -28,6 +30,7 @@ export function normalizeState(raw) {
     pollIntervalMs: Number.isInteger(poll) && poll >= 1000 && poll <= 60_000 ? poll : DEFAULT_STATE.pollIntervalMs,
     backupDir: typeof s.backupDir === 'string' ? s.backupDir.trim() : DEFAULT_STATE.backupDir,
     autoBackupBeforeOverwrite: typeof s.autoBackupBeforeOverwrite === 'boolean' ? s.autoBackupBeforeOverwrite : DEFAULT_STATE.autoBackupBeforeOverwrite,
+    backupKeep: validKeep(s.backupKeep) ? s.backupKeep : DEFAULT_STATE.backupKeep,
     activeCardFile: text(s.activeCardFile),
     activeWorldName: text(s.activeWorldName),
   };
@@ -39,7 +42,7 @@ const queueKeyOf = body => {
       case 'attach': case 'scanCard': return typeof body.cardFile === 'string' ? body.cardFile.replace(/\.png$/i, '') : null;
       case 'attachWorld': return body.worldName;
       case 'check': case 'sync': case 'diff': case 'resolve': case 'bindWorld': case 'export': case 'importFromWorkspace':
-      case 'detach': case 'backups': case 'restorePreview': case 'restore': return body.projectId;
+      case 'detach': case 'backups': case 'restorePreview': case 'restore': case 'rebind': return body.projectId;
       default: return null;
     }
   })();
@@ -52,11 +55,22 @@ export class SyncService {
     this.state = normalizeState(readJson(this.stateFile, {}));
     this.queue = new SerialQueue(); this.stableProjects = new Map(); this.logs = []; this.results = new Map(); this.previews = new Map(); this.timer = null; this.stopping = false;
   }
+  // 工程连着的酒馆卡文件还在不在。玩家删卡重导后旧文件名会消失；适配器不会列卡时按存在处理
+  cardExists(cardFile) {
+    if (!cardFile || cardFile.startsWith('world:') || typeof this.adapter.listCards !== 'function') return true;
+    const want = cardFile.toLowerCase();
+    return this.adapter.listCards().some(c => c.cardFile.toLowerCase() === want);
+  }
+  cardMissing(p) {
+    return p.attached && p.targetKind !== 'world' && !p.binding?.initializing && !p.pendingOperation && !this.cardExists(p.cardFile);
+  }
   decorateProject(p) {
     const result = this.results.get(p.id) ?? null;
+    const missing = this.cardMissing(p);
     return {
       ...p,
-      status: p.pendingOperation ? p.pendingOperation.state === 'reviewRequired' ? 'reviewRequired' : 'operationPending' : p.restoreRequired ? 'restoreRequired' : result?.error ? 'error' : !p.attached ? 'unattached' : result?.status ?? (p.paused ? 'paused' : 'unchecked'),
+      status: p.pendingOperation ? p.pendingOperation.state === 'reviewRequired' ? 'reviewRequired' : 'operationPending' : p.restoreRequired ? 'restoreRequired' : missing ? 'cardMissing' : result?.error ? 'error' : !p.attached ? 'unattached' : result?.status ?? (p.paused ? 'paused' : 'unchecked'),
+      ...(missing ? { missingCardFile: p.cardFile } : {}),
       lastResult: result,
     };
   }
@@ -64,13 +78,18 @@ export class SyncService {
   assembleProjects() {
     return discoverProjects(this.cardsRoot, { accept: isSingleCardDirectory }).map(p => this.decorateProject(p));
   }
+  // 备份规则只在这里定，所有覆盖操作（自动同步、合成导入、拆卡覆盖、冲突处理、恢复）都走这一处：
+  //   没有单独指定 → 按常驻设置。关闭常驻备份时已确认过一次（setAutoBackup），之后不再逐次确认
+  //   这一次单独要求跳过备份 → 仍须这一次的确认
   backupOptions(body = {}) {
     if (typeof body.backupDir === 'string') { this.state.backupDir = body.backupDir.trim(); this.saveState(); }
-    const skipBackup = body.skipBackup !== undefined ? Boolean(body.skipBackup) : !this.state.autoBackupBeforeOverwrite;
+    const explicit = body.skipBackup !== undefined;
+    const skipBackup = explicit ? Boolean(body.skipBackup) : !this.state.autoBackupBeforeOverwrite;
     return {
       skipBackup,
-      acceptDataLossRisk: Boolean(body.acceptDataLossRisk),
+      acceptDataLossRisk: explicit ? Boolean(body.acceptDataLossRisk) : skipBackup,
       backupDir: typeof body.backupDir === 'string' ? body.backupDir.trim() : (this.state.backupDir ?? ''),
+      backupKeep: this.state.backupKeep,
     };
   }
   record(action, projectId, result) {
@@ -119,7 +138,7 @@ export class SyncService {
     const worldName = this.state.activeWorldName ?? null;
     const worldProject = worldName ? projects.find(p => p.cardFile && p.cardFile.toLowerCase() === `world:${worldName}`.toLowerCase()) : null;
     const activeWorld = worldName ? { worldName, exists: (this.adapter.listWorlds?.() ?? []).some(w => w.worldName.toLowerCase() === worldName.toLowerCase()), attached: attached.has(`world:${worldName}`.toLowerCase()), projectId: worldProject?.id ?? null } : null;
-    return { running: !this.stopping, capabilities: { restoreMode: this.adapter.restoreMode ?? null }, paused: this.state.paused, cardsRoot: this.cardsRoot, backupDir: this.state.backupDir ?? '', autoBackupBeforeOverwrite: this.state.autoBackupBeforeOverwrite !== false, activeCardFile: this.state.activeCardFile ?? null, activeWorld, pollIntervalMs: this.state.pollIntervalMs, currentTask: this.queue.current, queuedTasks: this.queue.size,
+    return { running: !this.stopping, capabilities: { restoreMode: this.adapter.restoreMode ?? null }, paused: this.state.paused, cardsRoot: this.cardsRoot, backupDir: this.state.backupDir ?? '', autoBackupBeforeOverwrite: this.state.autoBackupBeforeOverwrite !== false, backupKeep: this.state.backupKeep, activeCardFile: this.state.activeCardFile ?? null, activeWorld, pollIntervalMs: this.state.pollIntervalMs, currentTask: this.queue.current, queuedTasks: this.queue.size,
       projects: projects.map(p => this.publicProject(p)), assembleProjects: assembleProjects.map(p => this.publicProject(p)), logs: [...this.logs] };
   }
   preview(type, project, data) {
@@ -136,6 +155,7 @@ export class SyncService {
   }
   async perform(project, options = {}) {
     if (project.restoreRequired) fail('RESTORE_REQUIRED', '恢复未完整完成；禁止同步，先重新执行完整恢复');
+    if (this.cardMissing(project)) fail('CARD_MISSING', `原来连的「${project.cardFile}」已不在酒馆里（可能被删掉或重新导入时换了文件名）；在面板点「改连当前打开的卡」`, 409, { missingCardFile: project.cardFile });
     try {
       const result = compactResult(await this.engine.run(project, options));
       const prev = this.results.get(project.id);
@@ -155,6 +175,14 @@ export class SyncService {
     if (project.binding.operation) fail('OPERATION_PENDING', '上次建卡/改名未完整确认；不会重复执行');
     // 自动同步永远不建卡、不补 card.md：建卡只在作者点「合成并导入酒馆」时发生
     if (!project.attached) return { projectId: project.id, status: 'unattached' };
+    // 连着的卡已经不在：只记一次，不再每轮重复报错，等作者改连
+    if (this.cardMissing(project)) {
+      const prev = this.results.get(project.id);
+      const result = { status: 'cardMissing', missingCardFile: project.cardFile };
+      this.results.set(project.id, result);
+      if (prev?.status !== 'cardMissing') this.record('cardMissing', project.id, { cardFile: project.cardFile });
+      return { projectId: project.id, ...result };
+    }
     if (project.binding.initializing) {
       if (!project.binding.initializeExpected) fail('OPERATION_PENDING', '首次建卡尚未确认，不能重复创建');
       const result = await this.perform(project, { initializeExpected: project.binding.initializeExpected });
@@ -234,6 +262,13 @@ export class SyncService {
       this.record('setAutoBackup', null, { enabled: body.enabled });
       return { autoBackupBeforeOverwrite: this.state.autoBackupBeforeOverwrite };
     }
+    if (body.action === 'setBackupKeep') {
+      if (!validKeep(body.keep)) fail('INVALID_ACTION', 'keep 必须是 0～1000 的整数（0 表示全部保留）', 400);
+      this.state.backupKeep = body.keep;
+      this.saveState();
+      this.record('setBackupKeep', null, { keep: body.keep });
+      return { backupKeep: this.state.backupKeep };
+    }
     if (body.action === 'projectPause') {
       if (typeof body.paused !== 'boolean') fail('INVALID_ACTION', 'paused 必须是布尔值', 400);
       const p = this.getProject(body.projectId);
@@ -291,6 +326,31 @@ export class SyncService {
           if (Array.isArray(saved)) for (const item of res.items) item.split = !saved.includes(item.key);
           return res;
         }
+        case 'rebind': {
+          // 改连：把工程改为连接酒馆里另一张已有的卡（玩家删卡重导后文件名变了）。只改绑定，不写卡、不写工程正文；
+          // 旧同步记录记的是旧文件名，换了目标后自动失效。两边一致就建立新记录，不一致只列差异交作者选
+          segment(body.cardFile, '卡文件名');
+          if (!/\.png$/i.test(body.cardFile)) fail('INVALID_CARD', '只能改连 PNG 卡', 400);
+          const p = this.getProject(body.projectId, { attached: false });
+          if (p.targetKind === 'world') fail('INVALID_ACTION', '独立世界书工程不能改连到角色卡', 400);
+          if (p.pendingOperation || p.restoreRequired || p.binding?.initializing) fail('OPERATION_PENDING', '工程还有未完成的操作；不能改连');
+          if (!this.cardExists(body.cardFile)) fail('CARD_NOT_FOUND', `酒馆里没有「${body.cardFile}」`, 404);
+          if (this.projects().some(o => !sameProjectPath(o.dir, p.dir) && targetOccupied(o, body.cardFile))) fail('ATTACH_CONFLICT', '这张卡已由其他工程连着；先解除那边的绑定');
+          const from = p.cardFile;
+          // projectName 取文件夹名：改连不触发自动改名
+          this.writeBinding({ ...p, cardFile: body.cardFile }, { detached: false, paused: false, projectName: p.name });
+          this.results.delete(p.id);
+          this.stableProjects.delete(p.id);
+          this.record('rebind', p.id, { from, cardFile: body.cardFile });
+          const refreshed = this.getProject(p.id);
+          const diff = await this.engine.inspect(refreshed);
+          if (diff.clean) {
+            const result = await this.perform(refreshed, {});
+            return { project: this.publicProject(this.getProject(p.id)), from, clean: true, sync: result };
+          }
+          this.results.set(p.id, { status: 'differences', diff: compactDiff(diff) });
+          return { project: this.publicProject(this.getProject(p.id)), from, clean: false, diff: compactDiff(diff) };
+        }
         case 'attachWorld': {
           segment(body.worldName, '世界书名');
           const target = `world:${body.worldName}`;
@@ -333,8 +393,10 @@ export class SyncService {
             : (assembleList.length === 1 ? assembleList[0].id : '');
           const p = this.getProject(targetId, { attached: false, preferAssemble: true });
           const backupOpts = this.backupOptions(body);
+          // 连着的卡已被删掉：按未连接处理，重新找同名卡或新建，不去读已不存在的旧文件
+          const attachedLive = p.attached && !this.cardMissing(p);
           let initializeExpected = null;
-          if (!p.attached) {
+          if (!attachedLive) {
             if (p.targetKind === 'world') {
               const target = `world:${p.name}`;
               this.writeBinding({ ...p, cardFile: target }, { detached: false, paused: false });
@@ -406,7 +468,7 @@ export class SyncService {
           const refreshed = this.getProject(p.id, { preferAssemble: true });
           const syncRes = await this.perform(refreshed, {
             ...(initializeExpected ? { initializeExpected } : { force: true, direction: 'push' }),
-            replaceRemote: Boolean((body.overwrite && !body.createNewCopy) || p.attached),
+            replaceRemote: Boolean((body.overwrite && !body.createNewCopy) || attachedLive),
             ...backupOpts,
           });
           this.record('importFromWorkspace', refreshed.id, { status: syncRes.status });
