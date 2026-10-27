@@ -42,10 +42,10 @@ export function planWorldEntryIds(scan, rawFiles, remoteSlots, baseline, { nodes
     const relPath = n.relPath.replaceAll('\\', '/'), raw = rawFiles[relPath];
     if (raw === undefined) fail('STALE_LOCAL', '扫描期间节点文件集合改变');
     const explicitUid = n.frontmatter?.tavern?.id;
-    if (explicitUid != null) {
-      const key = `entry:${explicitUid}`;
-      if (remote.has(key) || historical.has(key) || counts.get(key) > 1) fail('ENTRY_UID_COLLISION', `${relPath} 指定的 tavern.id 已被节点、酒馆或历史基线占用；不会改写作者 UID`);
-    }
+    // 文件写了 tavern.id 只是缺 id：它就是酒馆里那条（拆卡时记下的编号），和写了 id 的文件一样按编号和酒馆对比。
+    // 不再因为酒馆或基线里有这个编号就拒绝（旧做法会把同一条当成「被占用」，每轮都报错）。
+    // 正文不同时由三方对比列给作者选；只有本地两个文件用同一编号才拒绝
+    if (explicitUid != null && counts.get(`entry:${explicitUid}`) > 1) fail('ENTRY_UID_COLLISION', `${relPath} 的 tavern.id ${explicitUid} 和本地另一个条目文件重复；没有写入`);
     const seed = hashObject({ relPath, raw }).slice(0, 24); let id, uid;
     for (let attempt = 0; attempt < 10_000; attempt++) {
       id = `world-${seed}${attempt ? `-${attempt}` : ''}`; uid = explicitUid ?? fp.fnv1a(id);

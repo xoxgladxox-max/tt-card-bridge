@@ -450,9 +450,15 @@ test('generated UID avoids remote and historical collisions; explicit occupied U
     const assignments = planWorldEntryIds(scan, local.rawFiles, remote, baseline, libs);
     assert.notEqual(assignments[0].uid, uid);
   }
+  // 只缺 id、写了酒馆里已有的 tavern.id：就是那一条，补 id 时保留编号，不再当成被占用
   fs.writeFileSync(f.file, f.raw.replace('title: New entry', `tavern:\n  id: ${uid}\ntitle: New entry`));
   const scan = await libs.nodes.scanCard(f.project.dir), current = f.adapter.localSnapshot(f.project);
-  assert.throws(() => planWorldEntryIds(scan, current.rawFiles, { [`entry:${uid}`]: { value: 'occupied' } }, null, libs), e => e.code === 'ENTRY_UID_COLLISION');
+  const kept = planWorldEntryIds(scan, current.rawFiles, { [`entry:${uid}`]: { value: 'occupied' } }, { slots: { [`entry:${uid}`]: slotHash('old') } }, libs);
+  assert.equal(kept.length, 1); assert.equal(String(kept[0].uid), String(uid)); assert.match(kept[0].text, /\nid: world-/);
+  // 本地两个只缺 id 的文件用同一个 tavern.id：仍拒绝
+  fs.writeFileSync(path.join(f.project.dir, 'world_book', 'copy.md'), fs.readFileSync(f.file, 'utf8').replace('New entry body.', 'Copy body.'));
+  const scan2 = await libs.nodes.scanCard(f.project.dir), current2 = f.adapter.localSnapshot(f.project);
+  assert.throws(() => planWorldEntryIds(scan2, current2.rawFiles, {}, null, libs), e => e.code === 'ENTRY_UID_COLLISION');
 });
 test('editing during backup invalidates new-entry plan without replacing author text or pushing', async t => {
   const f = await newEntryFixture(t), backup = f.adapter.backup.bind(f.adapter), png = fs.readFileSync(f.pngPath);
