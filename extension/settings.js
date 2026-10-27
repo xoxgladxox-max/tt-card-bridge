@@ -74,76 +74,80 @@ export function mountSettings({ client, getContext }) {
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
-          <small data-role="status" role="status">扩展已加载，正在读取后台状态。</small>
-          <div data-role="error" role="alert" class="ttcb-warning" hidden></div>
-          <div class="flex-container">
-            ${icon('toggle', 'fa-power-off', '启动同步', '启动本机后台并启用自动同步；暂停只停止自动处理，不中断正在执行的写入')}
-            ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取后台状态')}
-          </div>
-          <small>连接：<code data-role="connection">读取中</code> · 工作区目录：<code data-role="cards-root">尚未连接</code></small>
-          <div class="flex-container">
-            <input data-role="cards-root-input" type="text" class="flex1" placeholder="工作区目录，例如：D:\cards" aria-label="工作区目录" autocomplete="off">
-            ${icon('set-cards-root', 'fa-folder-open', '切换工作区目录', '拆卡、同步、合成和 Agent 读写都在这个目录里')}
-          </div>
-          <div class="ttcb-backup-policy">
-            <div class="flex-container">
-              <label class="checkbox_label" title="常驻开关；关闭时确认一次，之后所有覆盖都直接执行"><input data-role="backup-before-overwrite" type="checkbox" checked><small>覆盖前自动备份，每张卡保留最近</small></label>
-              <input data-role="backup-keep" type="number" min="0" max="1000" step="1" value="5" class="text_pole" style="width:4.5em" aria-label="每张卡保留的备份份数" title="改完自动保存。0 = 全部保留。只清理同步前的自动快照；「接入前的工程」整目录备份不计数、不删除">
-              <small>份（0 = 全部保留）</small>
-            </div>
-            <small data-role="backup-off-note" class="ttcb-warning" hidden>已关闭覆盖前备份：覆盖后无法恢复旧版本。</small>
-            <div class="flex-container">
-              <input data-role="backup-dir" type="text" class="flex1" placeholder="自定义备份位置（留空默认保存在 工作区目录\\backups\\&lt;卡名&gt;\\ 下）" aria-label="自定义备份位置" autocomplete="off">
-              ${icon('set-backup-dir', 'fa-floppy-disk', '保存备份位置', '保存默认自定义备份文件夹路径')}
-            </div>
-          </div>
-          <hr>
-          <b>① 拆解当前卡</b>
-          <small data-role="current-card"></small>
-          <small>把酒馆当前打开的角色卡拆到工作区目录（<code>工作区目录\\&lt;卡名&gt;\\</code>），卡绑定的世界书一起放进卡文件夹。只处理当前打开的这一张。</small>
-          <div data-role="frameworks"></div>
-          <div data-role="extras"></div>
-          <div class="flex-container">
-            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '把当前卡拆到工作区目录（同名文件夹已存在时会先问是否覆盖）')}
-          </div>
-          <small>独立世界书（只认世界书编辑器里当前打开的那一本）：</small>
-          <div class="flex-container">
-            <select data-role="worlds" class="flex1" aria-label="世界书编辑器里当前打开的世界书"></select>
-            ${icon('attach-world', 'fa-book', '拆解独立世界书', '把所选世界书拆到工作区目录下')}
-          </div>
-          <hr>
-          <b>② 合成并导入酒馆</b>
-          <small>把工作区目录里的卡工程合成后写进酒馆。</small>
-          <select data-role="projects" aria-label="工作区目录里的卡工程"></select>
-          <small data-role="project-status"></small>
-          <div class="flex-container">
-            ${icon('import-workspace', 'fa-file-import', '合成并导入酒馆', '把工作区里的卡合成后写进酒馆（新卡会新建）')}
-            ${icon('rebind', 'fa-link', '改连当前打开的卡', '把这个卡工程改为连接酒馆里当前打开的卡（删卡重导后用）；只改连接，不写卡也不改文件')}
-            ${icon('backups', 'fa-clock-rotate-left', '备份', '查看这张卡的备份')}
-          </div>
-          <div data-role="diff"></div>
-          <div data-role="backups"></div>
-          <div data-role="restore"></div>
-          <hr>
-          <b>技能与 Agent 同步</b>
-          <small>将原件 skills/cf-* 与 Agent 配置同步到 LimCode TEST、Claude Code、~/.agents/skills 和酒馆（覆盖前按上方备份设置执行）。</small>
-          <div class="flex-container">
-            ${icon('skills-status', 'fa-magnifying-glass', '检查技能与Agent', '对照原件、版本存档、LimCode TEST、Claude Code、~/.agents/skills 与酒馆技能/Agent 状态')}
-            ${icon('skills-deploy', 'fa-wand-magic-sparkles', '同步技能与Agent', '存档当前版本并手动同步技能与 Agent 配置到 LimCode TEST、Claude Code、~/.agents/skills 和酒馆')}
-          </div>
-          <pre data-role="skills-output" class="ttcb-logs" hidden></pre>
-          <hr>
           <div class="flex-container alignitemscenter">
-            <small class="flex1">诊断含本机路径和卡名，不含令牌。</small>
-            ${icon('logs-toggle', 'fa-list', '日志', '显示或隐藏后台日志')}
-            ${icon('diagnostics', 'fa-copy', '复制诊断', '复制诊断信息')}
+            <small data-role="status" role="status" class="flex1">正在读取后台状态…</small>
+            ${icon('toggle', 'fa-power-off', '启动同步', '启动本机后台并开启自动同步；暂停不打断正在进行的写入')}
+            ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取状态，并把当前打开的卡告诉后台')}
           </div>
-          <pre data-role="logs" class="ttcb-logs" hidden></pre>
+          <small class="ttcb-dim">后台 <code data-role="connection">—</code> · 工作区 <code data-role="cards-root">—</code></small>
+          <small data-role="backup-off-note" class="ttcb-warning" hidden>已关闭覆盖前备份，覆盖后无法找回旧版本。</small>
+          <hr>
+          <small data-role="current-card"></small>
+          <div data-role="card-extras">
+            <div data-role="frameworks"></div>
+            <div data-role="extras"></div>
+          </div>
+          <div class="flex-container">
+            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '把当前卡和它绑定的世界书拆到 工作区\\\\<卡名>\\\\；同名文件夹已存在时先列清单再问是否覆盖')}
+            ${icon('rebind', 'fa-link', '改连到当前卡', '把工程改为连接当前打开的卡（删卡重导后用）；要改条目编号时先列清单确认')}
+          </div>
+          <div data-role="msg" class="ttcb-msg">
+            <div data-role="error" role="alert" class="ttcb-warning" hidden></div>
+            <div data-role="diff"></div>
+            <div data-role="backups"></div>
+            <div data-role="restore"></div>
+          </div>
+          <details class="ttcb-fold" data-fold="workspace">
+            <summary>工作区</summary>
+            <div class="flex-container alignitemscenter">
+              <select data-role="projects" class="flex1" aria-label="工作区里的卡工程"></select>
+              ${icon('import-workspace', 'fa-file-import', '导入酒馆', '把所选卡工程合成后写进酒馆；新卡会新建，同名卡先问覆盖还是另建副本')}
+              ${icon('backups', 'fa-clock-rotate-left', '备份', '查看所选工程的备份并预览恢复')}
+            </div>
+            <small data-role="project-status" class="ttcb-dim"></small>
+            <div class="flex-container alignitemscenter">
+              <select data-role="worlds" class="flex1" aria-label="世界书编辑器里当前打开的世界书" title="只列世界书编辑器里当前打开的那一本"></select>
+              ${icon('attach-world', 'fa-book', '拆解世界书', '把世界书编辑器里打开的这本独立世界书拆到工作区')}
+            </div>
+          </details>
+          <details class="ttcb-fold" data-fold="settings">
+            <summary>设置</summary>
+            <div class="flex-container alignitemscenter">
+              <input data-role="cards-root-input" type="text" class="flex1" placeholder="工作区目录，例如 D:\\cards" aria-label="工作区目录" autocomplete="off">
+              ${icon('set-cards-root', 'fa-folder-open', '切换', '拆卡、同步、合成和 Agent 读写都在这个目录里')}
+            </div>
+            <div class="flex-container alignitemscenter">
+              <label class="checkbox_label" title="关闭时确认一次，之后所有覆盖直接执行"><input data-role="backup-before-overwrite" type="checkbox" checked><small>覆盖前备份，每张卡保留</small></label>
+              <input data-role="backup-keep" type="number" min="0" max="1000" step="1" value="5" class="text_pole ttcb-num" aria-label="每张卡保留的备份份数" title="改完自动保存。0 = 全部保留。只清理同步前的自动快照">
+              <small>份（0 = 全留）</small>
+            </div>
+            <div class="flex-container alignitemscenter">
+              <input data-role="backup-dir" type="text" class="flex1" placeholder="备份位置（留空 = 工作区\\backups\\<卡名>\\）" aria-label="备份位置" autocomplete="off">
+              ${icon('set-backup-dir', 'fa-floppy-disk', '保存', '保存备份位置')}
+            </div>
+          </details>
+          <details class="ttcb-fold" data-fold="tools">
+            <summary>工具</summary>
+            <div class="flex-container">
+              ${icon('skills-status', 'fa-magnifying-glass', '检查技能', '对照原件与 LimCode TEST、Claude Code、~/.agents/skills、酒馆里的技能和 Agent')}
+              ${icon('skills-deploy', 'fa-wand-magic-sparkles', '同步技能', '存档当前版本后，把技能和 Agent 同步到各处（按备份设置先备份）')}
+              ${icon('logs-toggle', 'fa-list', '日志', '显示或隐藏后台日志')}
+              ${icon('diagnostics', 'fa-copy', '复制诊断', '复制诊断信息（含本机路径和卡名，不含令牌）')}
+            </div>
+            <pre data-role="skills-output" class="ttcb-logs" hidden></pre>
+            <pre data-role="logs" class="ttcb-logs" hidden></pre>
+          </details>
         </div></div>
       </div>`;
     for (const node of root.querySelectorAll('button')) node.classList.add('menu_button');
     for (const node of root.querySelectorAll('input[type="text"], select, textarea')) node.classList.add('text_pole');
     container.append(root);
+    // 折叠区默认收起，展开状态记在浏览器里
+    for (const fold of root.querySelectorAll('details[data-fold]')) {
+        const key = `ttcb-fold-${fold.dataset.fold}`;
+        try { fold.open = localStorage.getItem(key) === '1'; } catch { /* 无本地存储时保持收起 */ }
+        fold.addEventListener('toggle', () => { try { localStorage.setItem(key, fold.open ? '1' : '0'); } catch { /* 同上 */ } });
+    }
     const find = role => root.querySelector(`[data-role="${role}"]`);
     const action = name => root.querySelector(`[data-action="${name}"]`);
     let connection = null, state = null, busy = false, refreshing = false, projectSignature = '', worldSignature = '';
@@ -237,7 +241,7 @@ export function mountSettings({ client, getContext }) {
             const shown = issues.slice(0, 8);
             for (const issue of shown) box.append(element('p', issue.message, 'ttcb-warning'));
             if (issues.length > shown.length) {
-                box.append(element('small', `另有 ${issues.length - shown.length} 项结构或槽位差异未展开（如需用酒馆当前卡覆盖工程，可点上方「拆解当前卡」；如需用工程覆盖酒馆，可点「合成并导入酒馆」）。`));
+                box.append(element('small', `另有 ${issues.length - shown.length} 项结构或槽位差异未展开（整体以酒馆为准用「拆解当前卡」，以工程为准用工作区里的「导入酒馆」）。`));
             }
             return;
         }
@@ -258,28 +262,30 @@ export function mountSettings({ client, getContext }) {
         action('backups').disabled = busy || !project?.attached;
         const card = currentCard();
         action('rebind').disabled = busy || !state || !project || project.targetKind === 'world' || !card?.avatar || project.cardFile?.toLowerCase() === card.avatar.toLowerCase();
-        if (project) {
-            const errMsg = project.status === 'error' && project.lastResult?.error?.message ? `（${project.lastResult.error.message}）` : '';
-            const missMsg = project.status === 'cardMissing' ? `（原来连的「${project.missingCardFile ?? project.cardFile}」已不在酒馆里；打开要连的卡后点「改连当前打开的卡」，或点「合成并导入酒馆」重新导入）` : '';
-            find('project-status').textContent = `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? '已连接酒馆' : '还没进酒馆（点「合成并导入酒馆」）'} · ${statusLabels[project.status] ?? project.status ?? '状态未知'}${errMsg}${missMsg}${project.pendingOperation ? `；未决任务：${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`;
-        } else if (card) {
-            find('project-status').textContent = `当前卡「${card.name}」还没拆到工作区（点上方「拆解当前卡」）`;
-        } else {
-            find('project-status').textContent = '未选择卡';
-        }
+        const errOf = p => p?.status === 'error' && p.lastResult?.error?.message ? `：${p.lastResult.error.message}` : '';
+        find('project-status').textContent = project
+            ? `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? (statusLabels[project.status] ?? project.status ?? '状态未知') : '还没进酒馆'}${errOf(project)}${project.pendingOperation ? ` · 未决任务 ${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`
+            : '';
         // 后台正在跟的卡和酒馆当前打开的卡对不上时直接说出来
         const followGap = card?.avatar && state && (state.activeCardFile ?? '').toLowerCase() !== card.avatar.toLowerCase()
-            ? `；后台正在跟「${state.activeCardFile ?? '没有卡'}」，和当前打开的卡不一致，点「刷新」重新对上`
+            ? ` · 后台还在跟「${state.activeCardFile ?? '没有卡'}」，点「刷新」`
             : '';
         const cardMatched = card && (state?.projects ?? []).find(p => p.cardFile && p.cardFile.toLowerCase() === card.avatar?.toLowerCase());
         // 当前卡没有工程连着、但有工程原来连的卡已被删：多半是删卡重导，指向改连，不引导去重新拆解
         const orphans = cardMatched ? [] : (state?.projects ?? []).filter(p => p.status === 'cardMissing');
-        const unmatched = orphans.length
-            ? `没有工程连着它。工程${orphans.map(p => `「${p.id}」`).join('、')}原来连的卡已不在酒馆里：在下拉框选中它，点「改连当前打开的卡」`
-            : '还没拆到工作区';
+        const detail = cardMatched
+            ? `工程「${cardMatched.id}」 · ${statusLabels[cardMatched.status] ?? cardMatched.status ?? '状态未知'}${errOf(cardMatched)}`
+            : orphans.length
+                ? `没有工程连着；工程${orphans.map(p => `「${p.id}」`).join('、')}原来的卡已不在，可「改连到当前卡」`
+                : '还没拆到工作区';
         find('current-card').textContent = card
-            ? `酒馆当前卡：${card.name}（${card.avatar}） · ${cardMatched ? `已拆到工作区「${cardMatched.id}」` : unmatched}${followGap}`
-            : '先在酒馆选择一张角色卡；群聊中不能拆解当前卡。';
+            ? `当前卡：${card.name} · ${detail}${followGap}`
+            : '先在酒馆打开一张角色卡（群聊不支持）。';
+        // 只显示当前用得上的主按钮：没拆过才显示拆解和拆前清单；有可改连的工程才显示改连
+        const unmatched = !!card && !cardMatched;
+        action('attach').hidden = !unmatched;
+        find('card-extras').hidden = !unmatched;
+        action('rebind').hidden = !unmatched || action('rebind').disabled;
         // Preview-specific controls also need a live service, not just a loaded extension.
         for (const node of root.querySelectorAll('[data-service-action]')) node.disabled = busy || !state;
     }
@@ -295,7 +301,9 @@ export function mountSettings({ client, getContext }) {
         if (!avatar) return;
         // ② 的下拉只跟工作区目录走：当前卡刚好在里面就选中它，不在就保持原来的选择，不清空
         const pool = state?.assembleProjects ?? state?.projects ?? [];
-        const matched = pool.find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase());
+        const matched = pool.find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase())
+            // 当前卡没有工程、只有一个工程原来的卡已不在：预选它，「改连到当前卡」就是改它
+            ?? (() => { const o = pool.filter(p => p.status === 'cardMissing'); return o.length === 1 ? o[0] : null; })();
         if (matched && select.value !== matched.id) {
             select.value = matched.id;
             clearPreviews();
@@ -391,11 +399,11 @@ export function mountSettings({ client, getContext }) {
             connection = await client.connectionInfo();
             find('connection').textContent = connection.base;
             state = await client.status();
-            find('status').textContent = `本机后台已连接；${state.paused ? '自动同步已暂停' : '自动同步已启用'}${state.currentTask ? '；正在处理任务' : ''}。`;
+            find('status').textContent = `已连接 · ${state.paused ? '自动同步已暂停' : '自动同步中'}${state.currentTask ? ' · 正在处理' : ''}`;
             if (!actionFailed && (lastError.startsWith('本机后台未连接') || lastError.startsWith('缺少有效的本机连接配置'))) showError('');
         } catch (error) {
             state = null;
-            find('status').textContent = '扩展已加载；后台尚未连接。点击「启动同步」即可启动并连接。';
+            find('status').textContent = '后台未连接，点「启动同步」';
             if (!actionFailed) showError(error);
         } finally { refreshing = false; renderState(); }
     }
@@ -486,7 +494,7 @@ export function mountSettings({ client, getContext }) {
             if (backup.supported) row.append(serviceButton('预览恢复', async () => {
                 const preview = await client.control('restorePreview', { projectId, backupId: backup.id });
                 const target = find('restore'); target.replaceChildren();
-                target.append(element('p', '这是导入覆盖恢复的预览。执行前按上方备份设置执行，恢复后此卡保持暂停。'));
+                target.append(element('p', '这是导入覆盖恢复的预览。执行前按备份设置先备份，恢复后此卡保持暂停。'));
                 target.append(element('p', preview.notice ?? '导入会重编码PNG，并可能改写创建日期、聊天关联和收藏；不是原字节精确恢复。', 'ttcb-warning'));
                 target.append(element('pre', JSON.stringify(preview, null, 2)));
                 if (!preview.canRestore) {
@@ -569,7 +577,7 @@ export function mountSettings({ client, getContext }) {
                 } catch (error) {
                     if (error?.code !== 'ATTACH_CONFLICT') throw error;
                     const over = await askConfirm(
-                        `${error.message}\n\n「覆盖并绑定同名卡」：直接更新酒馆里的同名卡/世界书并开启实时双向同步（会按上方备份设置先备份，不会生成 1.png、2.png）。\n「另建新副本」：保留原卡不动，或者取消。`,
+                        `${error.message}\n\n「覆盖并绑定同名卡」：直接更新酒馆里的同名卡/世界书并开启实时双向同步（按备份设置先备份，不会生成 1.png、2.png）。\n「另建新副本」：保留原卡不动，或者取消。`,
                         '覆盖并绑定同名卡', '另建新副本 / 取消',
                     );
                     if (over) {
@@ -623,7 +631,7 @@ export function mountSettings({ client, getContext }) {
                 find('diff').replaceChildren(element('p', `已把「${p.id}」改连到「${card.avatar}」，${renum}两侧一致，已开启实时双向同步。`));
             } else {
                 showDiff(await client.control('diff', { projectId: p.id }), p.id);
-                importNote(`已把「${p.id}」改连到「${card.avatar}」，${renum}但两边内容不同：请在下方逐项选择以哪边为准；结构差异大时可改用「拆解当前卡」或「合成并导入酒馆」整体覆盖。`, true);
+                importNote(`已把「${p.id}」改连到「${card.avatar}」，${renum}但两边内容不同：请在下方逐项选择以哪边为准；结构差异大时可改用「拆解当前卡」或「导入酒馆」整体覆盖。`, true);
             }
         },
         'set-cards-root': async () => {

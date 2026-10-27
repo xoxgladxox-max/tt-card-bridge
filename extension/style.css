@@ -1,8 +1,18 @@
 /* Only layout the host theme does not already provide; colours, borders and buttons come from the host. */
 #tt-card-bridge-settings .ttcb-body { display: flex; flex-direction: column; gap: 4px; }
-#tt-card-bridge-settings .ttcb-body > small { opacity: .8; overflow-wrap: anywhere; }
+#tt-card-bridge-settings .ttcb-body small { overflow-wrap: anywhere; }
+#tt-card-bridge-settings .ttcb-dim { opacity: .7; }
 #tt-card-bridge-settings code { overflow-wrap: anywhere; }
+#tt-card-bridge-settings hr { margin: 4px 0; }
+#tt-card-bridge-settings [hidden] { display: none !important; }
 #tt-card-bridge-settings .menu_button:disabled { opacity: .5; cursor: not-allowed; }
+#tt-card-bridge-settings .ttcb-num { width: 4.5em; flex: none; }
+#tt-card-bridge-settings .ttcb-msg:not(:has(> :not(:empty):not([hidden]))) { display: none; }
+#tt-card-bridge-settings .ttcb-msg p { margin: 2px 0; }
+#tt-card-bridge-settings .ttcb-fold { border-top: 1px solid var(--SmartThemeBorderColor); padding-top: 4px; }
+#tt-card-bridge-settings .ttcb-fold > summary { cursor: pointer; opacity: .85; user-select: none; }
+#tt-card-bridge-settings .ttcb-fold[open] > summary { margin-bottom: 4px; }
+#tt-card-bridge-settings .ttcb-fold > * + * { margin-top: 4px; }
 #tt-card-bridge-settings .ttcb-field { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 #tt-card-bridge-settings .ttcb-sides { display: flex; gap: 6px; }
 #tt-card-bridge-settings .ttcb-slot { padding: 4px 0; border-bottom: 1px solid var(--SmartThemeBorderColor); }
