@@ -780,7 +780,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           const buf = new BrowserBuffer(await res.arrayBuffer());
           __vfsFiles.set(\`/tavern/default-user/characters/\${avatar}\`, { bytes: buf, mtimeMs: Date.now() });
           try {
-            const card = __mod_bridge_png.parseChunks(buf);
+            const card = __mod_Slots.readCardPng(buf);
             const w = card?.data?.extensions?.world;
             if (w) wantedWorlds.add(w);
           } catch {}

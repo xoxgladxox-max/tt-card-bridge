@@ -56,7 +56,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步 <small class="ttcb-dim">v0.3.2</small></b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.3.3</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">

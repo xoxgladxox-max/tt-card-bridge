@@ -10961,7 +10961,9 @@ class FileSyncAdapter {
     const blockingErrors = validation.errors.filter(e => e.rule !== 'P24');
     if (blockingErrors.length) fail('INVALID_PROJECT', protocol.formatReport({ errors: blockingErrors, warnings: [] }), 422);
     const worldOverride = project.cardFile.startsWith('world:') ? null : readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
-    const nameOverride = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
+    const fileStem = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
+    const remoteName = remote.tavern.card?.data?.name ?? remote.tavern.card?.name ?? null;
+    const nameOverride = fileStem && remoteName === fileStem ? fileStem : null;
     const built = this.assembleCard(scan, build, worldOverride, nameOverride);
     const nodes = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan);
     for (const [key, slot] of Object.entries(nodes.slots)) if (key.startsWith('entry:') && isWorldEntryPath(slot.relPath)) slot.newEntryEligible = true;
@@ -11348,7 +11350,13 @@ class FileSyncAdapter {
       const snapshot = await this.snapshot(staged);
       const { compareSnapshot } = __mod_sync_engine;
       const diff = compareSnapshot(snapshot);
-      if (!diff.clean) fail('ATTACH_VERIFY_FAILED', 'unpack 后正文、设置或外置世界书不一致；没有接管', 409, diff);
+      if (!diff.clean) {
+        const detailText = [
+          ...(diff.issues ?? []).map(i => i.message),
+          ...(diff.changedSlots ?? []).map(s => `槽位不一致：${s.label ?? s.key}`),
+        ].join('；');
+        fail('ATTACH_VERIFY_FAILED', `unpack 后正文、设置或外置世界书不一致${detailText ? `（${detailText}）` : ''}；没有接管`, 409, diff);
+      }
       if (JSON.stringify(this.remote(project).expected) !== JSON.stringify(remote.expected)) fail('STALE_REMOTE', '接入期间酒馆卡或世界书改变');
       const originals = path.join(out, '.card-forge', 'originals');
       fs.mkdirSync(originals, { recursive: true });
@@ -12106,7 +12114,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           const buf = new BrowserBuffer(await res.arrayBuffer());
           __vfsFiles.set(`/tavern/default-user/characters/${avatar}`, { bytes: buf, mtimeMs: Date.now() });
           try {
-            const card = __mod_bridge_png.parseChunks(buf);
+            const card = __mod_Slots.readCardPng(buf);
             const w = card?.data?.extensions?.world;
             if (w) wantedWorlds.add(w);
           } catch {}
