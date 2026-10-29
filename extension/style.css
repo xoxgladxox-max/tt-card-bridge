@@ -6,6 +6,7 @@
 #tt-card-bridge-settings hr { margin: 4px 0; }
 #tt-card-bridge-settings [hidden] { display: none !important; }
 #tt-card-bridge-settings .menu_button:disabled { opacity: .5; cursor: not-allowed; }
+#tt-card-bridge-settings .ttcb-button { width: auto; max-width: 100%; white-space: normal; padding: 4px 10px; }
 #tt-card-bridge-settings .ttcb-msg:not(:has(> :not(:empty):not([hidden]))) { display: none; }
 #tt-card-bridge-settings .ttcb-msg p { margin: 2px 0; }
 #tt-card-bridge-settings .ttcb-fold { border-top: 1px solid var(--SmartThemeBorderColor); padding-top: 4px; }

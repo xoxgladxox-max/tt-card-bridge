@@ -11891,12 +11891,19 @@ const IDB_STORE = 'handles';
 const IDB_KEY = 'workspaceHandle';
 
 function openHandleDb() {
-  return new Promise((resolve, reject) => {
+  return new Promise(resolve => {
     if (!globalThis.indexedDB) return resolve(null);
-    const req = globalThis.indexedDB.open(IDB_NAME, 1);
-    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null);
+    const timer = setTimeout(() => resolve(null), 1500);
+    try {
+      const req = globalThis.indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => { try { req.result.createObjectStore(IDB_STORE); } catch {} };
+      req.onsuccess = () => { clearTimeout(timer); resolve(req.result); };
+      req.onerror = () => { clearTimeout(timer); resolve(null); };
+      req.onblocked = () => { clearTimeout(timer); resolve(null); };
+    } catch {
+      clearTimeout(timer);
+      resolve(null);
+    }
   });
 }
 
@@ -11934,13 +11941,25 @@ async function clearSavedHandle() {
 }
 
 const IGNORED_DIRS = new Set(['backups', 'dist', 'node_modules', '.git']);
+const ALLOWED_PROJECT_SUBDIRS = new Set(['.card-forge', 'message', 'world_book', 'regex', 'scripts', '待归位', 'world', 'character', 'greeting', 'output', 'style']);
+const ALLOWED_FILE_EXTS = /.(md|json|js|html|png)$/i;
 
 export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, fetchImpl = (...args) => fetch(...args) }) {
   let rootHandle = null;
+  let rootIsSingleCard = false;
   let service = null;
   let adapter = null;
   const diskCache = new Map(); // relPath -> { mtimeMs, size }
-  const pngCache = new Map(); // avatar -> { hash, bytes }
+
+  async function isCardProjectDirHandle(dirHandle) {
+    for (const marker of ['card.md', 'index.md']) {
+      try { await dirHandle.getFileHandle(marker); return true; } catch {}
+    }
+    for (const sub of ['.card-forge', 'world_book', 'message']) {
+      try { await dirHandle.getDirectoryHandle(sub); return true; } catch {}
+    }
+    return false;
+  }
 
   async function pullDiskToVfs() {
     if (!rootHandle) return false;
@@ -11948,19 +11967,22 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     const seenDirs = new Set(['/workspace']);
     let changed = false;
 
-    async function walkDir(dirHandle, relPrefix, depth) {
-      if (depth > 6) return;
+    async function walkProjectDir(dirHandle, relPrefix, depthInProject) {
+      if (depthInProject > 5) return;
       for await (const [name, entry] of dirHandle.entries()) {
-        const rel = relPrefix ? `${relPrefix}/${name}` : name;
+        const rel = `${relPrefix}/${name}`;
         const vfsPath = `/workspace/${rel}`;
         if (entry.kind === 'directory') {
+          if (depthInProject === 0 && !ALLOWED_PROJECT_SUBDIRS.has(name)) continue;
           if (IGNORED_DIRS.has(name)) continue;
           seenDirs.add(vfsPath);
           __vfsEnsureDir(vfsPath, false);
-          await walkDir(entry, rel, depth + 1);
+          await walkProjectDir(entry, rel, depthInProject + 1);
         } else if (entry.kind === 'file') {
+          if (!ALLOWED_FILE_EXTS.test(name)) continue;
           seenFiles.add(vfsPath);
           const file = await entry.getFile();
+          if (file.size > 20 * 1024 * 1024) continue;
           const prev = diskCache.get(rel);
           if (!prev || prev.mtimeMs !== file.lastModified || prev.size !== file.size || !__vfsFiles.has(vfsPath)) {
             const buf = new BrowserBuffer(await file.arrayBuffer());
@@ -11972,7 +11994,26 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         }
       }
     }
-    await walkDir(rootHandle, '', 0);
+
+    // 如果用户直接选了单张卡的文件夹本身，也支持识别；正常情况是选包含多张卡的总工作区目录
+    rootIsSingleCard = await isCardProjectDirHandle(rootHandle);
+    if (rootIsSingleCard) {
+      const cardName = rootHandle.name;
+      const vfsPath = `/workspace/${cardName}`;
+      seenDirs.add(vfsPath);
+      __vfsEnsureDir(vfsPath, false);
+      await walkProjectDir(rootHandle, cardName, 0);
+    } else {
+      for await (const [name, entry] of rootHandle.entries()) {
+        if (entry.kind !== 'directory' || IGNORED_DIRS.has(name) || name.startsWith('.')) continue;
+        if (!(await isCardProjectDirHandle(entry))) continue;
+        const vfsPath = `/workspace/${name}`;
+        seenDirs.add(vfsPath);
+        __vfsEnsureDir(vfsPath, false);
+        await walkProjectDir(entry, name, 0);
+      }
+    }
+
     for (const k of [...__vfsFiles.keys()]) {
       if (k.startsWith('/workspace/') && !seenFiles.has(k)) {
         __vfsFiles.delete(k);
@@ -11993,6 +12034,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     const ops = __vfsPendingDiskOps.splice(0, __vfsPendingDiskOps.length);
     for (const item of ops) {
       const parts = item.rel.split('/').filter(Boolean);
+      if (rootIsSingleCard && parts[0] === rootHandle.name) parts.shift();
       if (!parts.length) continue;
       const leaf = parts.pop();
       try {
@@ -12135,8 +12177,13 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     return { ready: true, folderName: rootHandle.name };
   }
 
-  async function authorizeWorkspace({ pickNew = false } = {}) {
-    if (pickNew || !rootHandle) {
+  async function authorizeWorkspace({ pickNew = false, handle = null } = {}) {
+    if (handle) {
+      rootHandle = handle;
+      await saveDirectoryHandle(rootHandle);
+      diskCache.clear();
+      for (const k of [...__vfsFiles.keys()]) if (k.startsWith('/workspace/')) __vfsFiles.delete(k);
+    } else if (pickNew || !rootHandle) {
       if (typeof globalThis.window?.showDirectoryPicker !== 'function') {
         throw new Error('当前浏览器不支持直接选择本地文件夹（File System Access API），请使用 Chrome / Edge / TauriTavern，或运行 install.bat 启动本机后台。');
       }

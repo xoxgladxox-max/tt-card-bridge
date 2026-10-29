@@ -1,9 +1,9 @@
 // One authenticated loopback connection serves the settings panel and queued tasks.
 // 带上版本号查询参数，避免在酒馆点「更新扩展」后浏览器继续使用旧版子模块缓存
-import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.0';
-import { mountSettings } from './settings.js?v=0.3.0';
-import { createTavernMutations } from './tavern-mutations.js?v=0.3.0';
-import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.0';
+import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.1';
+import { mountSettings } from './settings.js?v=0.3.1';
+import { createTavernMutations } from './tavern-mutations.js?v=0.3.1';
+import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.1';
 
 const TAG = '[tt-card-bridge]';
 let known = null;

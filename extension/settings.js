@@ -21,8 +21,10 @@ function setLabel(node, label) {
     if (span) span.textContent = label; else node.textContent = label;
 }
 function button(label, run) {
-    const node = element('button', label, 'menu_button ttcb-button');
+    const node = element('button', label, 'menu_button menu_button_icon ttcb-button');
     node.type = 'button';
+    node.style.width = 'auto';
+    node.style.padding = '4px 10px';
     node.addEventListener('click', run);
     return node;
 }
@@ -54,7 +56,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步 <small class="ttcb-dim">v0.3.0</small></b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.3.1</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
@@ -137,6 +139,31 @@ export function mountSettings({ client, getContext, refreshCards }) {
         return option.textContent?.trim() || null;
     };
     const confirmAction = message => typeof window.confirm === 'function' ? window.confirm(message) : true;
+    // 在用户点击事件的同一同步调用栈内直接拉起系统文件夹选择框（不先设 busy=true 灰掉按钮，也不经过前置 await），
+    // 避免浏览器因按钮被禁用或异步等待而吞掉弹窗焦点导致按钮卡灰
+    async function pickAndAuthorizeWorkspace() {
+        if (busy) return;
+        if (typeof window.showDirectoryPicker !== 'function') {
+            showError(new Error('当前浏览器环境不支持直接弹出本地文件夹选择框（showDirectoryPicker），请使用 Chrome / Edge 浏览器打开酒馆，或运行 install.bat 启动本机后台。'));
+            return;
+        }
+        let handle;
+        try {
+            handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+        } catch (err) {
+            if (err?.name === 'AbortError') return;
+            showError(err);
+            return;
+        }
+        await run(async () => {
+            setupDismissed = false;
+            state = await client.authorizeWorkspace({ pickNew: true, handle });
+            find('cards-root-input').value = state.cardsRoot;
+            clearPreviews();
+            await checkCardFollow({ force: true });
+            done(`已启用本地卡工程同步（${state.cardsRoot}），现在可以点「拆解当前卡」或「连接」。`);
+        });
+    }
     function showSetupConfirmPrompt(error) {
         const isPerm = error?.code === 'FOLDER_PERMISSION_REQUIRED';
         const sig = `setup|${error?.code}|${error?.details?.folderName ?? ''}`;
@@ -156,19 +183,9 @@ export function mountSettings({ client, getContext, refreshCards }) {
                 await checkCardFollow({ force: true });
                 done(`已恢复工作区连接（${state.cardsRoot}），实时同步已开启。`);
             })));
-            row.append(button('更换工作区文件夹', () => run(async () => {
-                setupDismissed = false;
-                state = await client.authorizeWorkspace({ pickNew: true });
-                await checkCardFollow({ force: true });
-                done(`已切换工作区至「${state.cardsRoot}」，实时同步已开启。`);
-            })));
+            row.append(button('更换工作区文件夹', () => { pickAndAuthorizeWorkspace(); }));
         } else {
-            row.append(button('确认启用（选择本地工作区文件夹）', () => run(async () => {
-                setupDismissed = false;
-                state = await client.authorizeWorkspace({ pickNew: true });
-                await checkCardFollow({ force: true });
-                done(`已启用本地卡工程同步（${state.cardsRoot}），现在可以点「拆解当前卡」或「连接」。`);
-            })));
+            row.append(button('确认启用（选择本地工作区文件夹）', () => { pickAndAuthorizeWorkspace(); }));
             row.append(button('暂不启用', () => {
                 setupDismissed = true;
                 conflictShownFor = '';
@@ -487,12 +504,6 @@ export function mountSettings({ client, getContext, refreshCards }) {
         },
         'set-cards-root': async () => {
             if (connection?.mode === 'browser') {
-                setupDismissed = false;
-                const res = await client.authorizeWorkspace({ pickNew: true });
-                find('cards-root-input').value = res.cardsRoot;
-                clearPreviews();
-                await checkCardFollow({ force: true });
-                find('diff').replaceChildren(element('p', `已切换本地工作区文件夹至：${res.cardsRoot}`));
                 return;
             }
             const cardsRoot = find('cards-root-input').value.trim();
@@ -525,7 +536,19 @@ export function mountSettings({ client, getContext, refreshCards }) {
             out.hidden = false;
         },
     };
-    for (const [name, fn] of Object.entries(actions)) action(name)?.addEventListener('click', () => run(fn));
+    for (const [name, fn] of Object.entries(actions)) {
+        action(name)?.addEventListener('click', () => {
+            if (name === 'set-cards-root' && connection?.mode === 'browser') {
+                pickAndAuthorizeWorkspace();
+                return;
+            }
+            if (name === 'toggle' && connection?.mode === 'browser' && !state) {
+                pickAndAuthorizeWorkspace();
+                return;
+            }
+            run(fn);
+        });
+    }
     // Local view actions do not call the service or immediately overwrite the status line via refresh().
     action('logs-toggle').addEventListener('click', () => {
         const logsEl = find('logs');
