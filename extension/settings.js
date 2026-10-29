@@ -54,14 +54,14 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步</b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.3.0</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
           <div class="flex-container alignitemscenter">
             <small data-role="status" role="status" class="flex1">正在读取后台状态…</small>
             ${icon('toggle', 'fa-power-off', '启动同步', '启动本机后台并开启自动同步；暂停不打断正在进行的写入')}
-            ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取状态，并把当前打开的卡告诉后台')}
+            ${icon('refresh', 'fa-arrows-rotate', '刷新', '重新读取状态，并把当前打开的卡告诉后台（若刚在酒馆更新了插件版本，请按 Ctrl+F5 刷新浏览器网页生效）')}
           </div>
           <small class="ttcb-dim">后台 <code data-role="connection">—</code> · 工作区 <code data-role="cards-root">—</code></small>
           <hr>
