@@ -56,7 +56,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步 <small class="ttcb-dim">v0.3.1</small></b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.3.2</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
@@ -73,8 +73,8 @@ export function mountSettings({ client, getContext, refreshCards }) {
             <div data-role="extras"></div>
           </div>
           <div class="flex-container">
-            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '第一次把酒馆里的这张卡变成本地工程：拆到 工作区\\\\<卡名>\\\\，拆完自动连上')}
-            ${icon('connect', 'fa-link', '连接', '把「工作区」里选中的卡工程连到酒馆：没进过酒馆的新建一张卡；连过的两边一致就直接连上，不一致让你选「以本地为准覆盖」或「新建卡」')}
+            ${icon('attach', 'fa-boxes-packing', '拆解当前卡', '把酒馆当前打开的整张角色卡（含人设、开场白、绑定的整本世界书、正则与脚本）拆到 工作区\\\\<卡名>\\\\，拆完自动连上')}
+            ${icon('connect', 'fa-link', '连接', '把下方「工作区」下拉框中手动选中的本地卡工程连到酒馆：没进过酒馆的会新建一张卡；连过的两边一致直接连上，不一致让你选「以本地为准覆盖」或「新建卡」')}
           </div>
           <div data-role="msg" class="ttcb-msg">
             <div data-role="error" role="alert" class="ttcb-warning" hidden></div>
@@ -86,10 +86,6 @@ export function mountSettings({ client, getContext, refreshCards }) {
               <select data-role="projects" class="flex1" aria-label="工作区里的卡工程"></select>
             </div>
             <small data-role="project-status" class="ttcb-dim"></small>
-            <div class="flex-container alignitemscenter">
-              <select data-role="worlds" class="flex1" aria-label="世界书编辑器里当前打开的世界书" title="只列世界书编辑器里当前打开的那一本"></select>
-              ${icon('attach-world', 'fa-book', '拆解世界书', '把世界书编辑器里打开的这本独立世界书拆到工作区')}
-            </div>
           </details>
           <details class="ttcb-fold" data-fold="settings">
             <summary>设置</summary>
@@ -122,11 +118,15 @@ export function mountSettings({ client, getContext, refreshCards }) {
     }
     const find = role => root.querySelector(`[data-role="${role}"]`);
     const action = name => root.querySelector(`[data-action="${name}"]`);
-    let connection = null, state = null, busy = false, refreshing = false, projectSignature = '', worldSignature = '';
-    let lastError = '', lastPolled = 0, actionFailed = false, lastFollowedCard = undefined, lastFollowedWorld = undefined, scannedCard = null, conflictShownFor = '', setupDismissed = false;
-    const selectedProject = () => state?.assembleProjects?.find(project => project.id === find('projects').value) ?? state?.projects?.find(project => project.id === find('projects').value);
-    // ② 用：下拉没选中时，工作区目录里只有一张卡就用那张
-    const assembleTarget = () => selectedProject() || (state?.assembleProjects?.length === 1 ? state.assembleProjects[0] : null);
+    let connection = null, state = null, busy = false, refreshing = false, projectSignature = '';
+    let lastError = '', lastPolled = 0, actionFailed = false, lastFollowedCard = undefined, lastFollowedWorld = undefined, lastSyncedCardAvatar = undefined, scannedCard = null, conflictShownFor = '', setupDismissed = false;
+    const selectedProject = () => {
+        const val = find('projects').value;
+        if (!val) return null;
+        return state?.assembleProjects?.find(project => project.id === val) ?? state?.projects?.find(project => project.id === val) ?? null;
+    };
+    // 严格以用户在「工作区」下拉框选中的工程为准；选「（未选择本地卡工程）」时绝不自动拿其它工程代替
+    const assembleTarget = () => selectedProject();
     const currentCard = () => {
         const ctx = getContext();
         return ctx.groupId ? null : ctx.characters?.[ctx.characterId];
@@ -289,8 +289,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
         action('skills-status').disabled = busy || !state;
         action('skills-deploy').disabled = busy || !state;
         action('attach').disabled = busy || !state || !currentCard();
-        action('attach-world').disabled = busy || !state || !find('worlds').value;
-        const project = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
+        const project = assembleTarget();
         const card = currentCard();
         // 已经连着、酒馆也正打开它时不用再连
         const liveHere = project && card?.avatar && project.cardFile?.toLowerCase() === card.avatar.toLowerCase() && ['clean', 'pending'].includes(project.status);
@@ -298,8 +297,8 @@ export function mountSettings({ client, getContext, refreshCards }) {
         setLabel(action('connect'), project && project.targetKind !== 'world' ? `连接「${project.id}」` : '连接');
         const errOf = p => p?.status === 'error' && p.lastResult?.error?.message ? `：${p.lastResult.error.message}` : '';
         find('project-status').textContent = project
-            ? `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? (statusLabels[project.status] ?? project.status ?? '状态未知') : '还没进酒馆'}${errOf(project)}${project.pendingOperation ? ` · 未决任务 ${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`
-            : '';
+            ? `${project.name ?? project.cardFile ?? project.id} · ${project.attached ? (statusLabels[project.status] ?? project.status ?? '状态未知') : '还没进酒馆（点上方「连接」可在酒馆新建此卡）'}${errOf(project)}${project.pendingOperation ? ` · 未决任务 ${project.pendingOperation.jobId ?? project.pendingOperation.id ?? ''}` : ''}`
+            : '未选择本地卡工程（不选择时不会对任何本地工程执行覆盖、新建或删除）';
         // 后台正在跟的卡和酒馆当前打开的卡对不上时直接说出来
         const followGap = card?.avatar && state && (state.activeCardFile ?? '').toLowerCase() !== card.avatar.toLowerCase()
             ? ` · 后台还在跟「${state.activeCardFile ?? '没有卡'}」，点「刷新」`
@@ -323,17 +322,20 @@ export function mountSettings({ client, getContext, refreshCards }) {
         const select = find('projects');
         const card = currentCard();
         const avatar = card?.avatar ?? null;
-        if (!avatar) return;
-        // ② 的下拉只跟工作区目录走：当前卡刚好在里面就选中它，不在就保持原来的选择，不清空
         const pool = state?.assembleProjects ?? state?.projects ?? [];
-        const matched = pool.find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase())
-            // 当前卡没有工程、只有一个工程原来的卡已不在：预选它，好直接「新建卡」
-            ?? (() => { const o = pool.filter(p => p.status === 'cardMissing'); return o.length === 1 ? o[0] : null; })();
-        if (matched && select.value !== matched.id) {
-            select.value = matched.id;
-            clearPreviews();
+        const matched = avatar
+            ? pool.find(p => p.cardFile && p.cardFile.toLowerCase() === avatar.toLowerCase())
+            : null;
+        // 只有酒馆切换了当前打开的卡（或首次读取）时，才将下拉框同步到当前卡匹配的工程；
+        // 若当前打开的卡在本地没有匹配工程，则严格置为「（未选择本地卡工程）」('')，绝不自动锁死到其它工程（如 cardMissing 的旧工程）
+        if (avatar !== lastSyncedCardAvatar) {
+            lastSyncedCardAvatar = avatar;
+            const nextVal = matched ? matched.id : '';
+            if (select.value !== nextVal) {
+                select.value = nextVal;
+                clearPreviews();
+            }
         }
-        if (!select.value && pool.length === 1) select.value = pool[0].id;
     }
     function renderState() {
         find('cards-root').textContent = state?.cardsRoot ?? '尚未连接';
@@ -346,38 +348,23 @@ export function mountSettings({ client, getContext, refreshCards }) {
             const current = currentCard()?.avatar;
             select.replaceChildren();
             if (!pool.length) {
-                const opt = element('option', '（所选装配文件夹内暂无卡工程）');
+                const opt = element('option', '（所选工作区文件夹内暂无卡工程）');
                 opt.value = '';
                 select.append(opt);
             } else {
+                const noneOpt = element('option', '（未选择本地卡工程）');
+                noneOpt.value = '';
+                select.append(noneOpt);
                 for (const project of pool) {
                     const option = element('option', `${project.name ?? project.cardFile ?? project.id}${project.attached ? '' : '（还没连到酒馆）'}`);
                     option.value = project.id;
                     select.append(option);
                 }
             }
-            const chosen = pool.find(p => p.cardFile && current && p.cardFile.toLowerCase() === current.toLowerCase())
-                ?? pool.find(p => p.id === previous)
-                ?? (pool.length === 1 ? pool[0] : null);
-            if (chosen) select.value = chosen.id;
+            const matchedCurrent = pool.find(p => p.cardFile && current && p.cardFile.toLowerCase() === current.toLowerCase());
+            const keptPrevious = previous && pool.find(p => p.id === previous);
+            select.value = keptPrevious ? keptPrevious.id : (matchedCurrent ? matchedCurrent.id : '');
             if (select.value !== previous) clearPreviews();
-        }
-        // 独立世界书：只放世界书编辑器里当前打开的那一本
-        const activeWorld = state?.activeWorld ?? null;
-        const nextWorldSig = JSON.stringify(activeWorld);
-        if (nextWorldSig !== worldSignature) {
-            worldSignature = nextWorldSig;
-            const wSelect = find('worlds');
-            wSelect.replaceChildren();
-            if (!activeWorld) {
-                const opt = element('option', '（世界书编辑器里没有打开世界书）'); opt.value = ''; wSelect.append(opt);
-            } else if (!activeWorld.exists) {
-                const opt = element('option', `（找不到世界书文件：${activeWorld.worldName}）`); opt.value = ''; wSelect.append(opt);
-            } else {
-                const opt = element('option', `${activeWorld.worldName}${activeWorld.attached ? `（已拆到工作区「${activeWorld.projectId ?? activeWorld.worldName}」）` : ''}`);
-                opt.value = activeWorld.worldName; wSelect.append(opt);
-                wSelect.value = activeWorld.worldName;
-            }
         }
         if (lastFollowedCard !== undefined) syncSelectionToCurrentCard();
         if (!find('logs').hidden) {
@@ -472,8 +459,8 @@ export function mountSettings({ client, getContext, refreshCards }) {
             return res;
         },
         connect: async () => {
-            const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
-            if (!p) throw new Error('先在「工作区」里选中要连接的卡工程。');
+            const p = assembleTarget();
+            if (!p) throw new Error('请先在下方「工作区」下拉框中选择要连接的本地卡工程。');
             const ask = p.cardFile
                 ? `把卡工程「${p.id}」连到酒馆里的「${p.cardFile}」？\n两边一致就直接连上；不一致会让你选「以本地为准覆盖」或「新建卡」。`
                 : `卡工程「${p.id}」还没进过酒馆。按本地工程新建一张卡和一本世界书（重名会起新名字），之后实时同步。继续？`;
@@ -493,14 +480,6 @@ export function mountSettings({ client, getContext, refreshCards }) {
             if (state?.paused !== false) state = await client.control('resume');
             await checkCardFollow({ force: true });
             find('diff').replaceChildren(element('p', `已把「${card.name}」拆到工作区「${card.avatar.replace(/\.png$/i, '')}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}，已开启实时双向同步。`));
-        },
-        'attach-world': async () => {
-            const worldName = find('worlds').value;
-            if (!worldName) throw new Error('先在酒馆的世界书编辑器里打开要拆的那本世界书。');
-            if (worldName !== currentWorldName()) throw new Error('世界书编辑器里打开的世界书已经换了，请稍等面板刷新后再点。');
-            await attachWithConflictPrompt('attachWorld', { worldName }, worldName);
-            if (state?.paused !== false) state = await client.control('resume');
-            find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」，已开启实时双向同步。`));
         },
         'set-cards-root': async () => {
             if (connection?.mode === 'browser') {
@@ -575,8 +554,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
         showError('');
         find('status').textContent = (copiedSync || copiedAsync) ? '诊断信息已复制。' : '已生成诊断信息。';
     });
-    find('projects').addEventListener('change', () => { clearPreviews(); renderControls(); });
-    find('worlds').addEventListener('change', renderControls);
+    find('projects').addEventListener('change', () => { clearPreviews(); renderControls(); showReconnectIfAny(); });
     renderControls();
     return { refresh, checkCardFollow, showError, root, dispose: () => root.remove() };
 }

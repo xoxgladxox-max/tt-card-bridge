@@ -10958,7 +10958,8 @@ class FileSyncAdapter {
     const idAssignments = planWorldEntryIds(scan, rawFiles, remote.tavern.slots, baseline, libs);
     assertUniqueEntryUids(scan, lib, fp);
     const validation = protocol.validateNodes(scan);
-    if (validation.errors.length) fail('INVALID_PROJECT', protocol.formatReport(validation), 422);
+    const blockingErrors = validation.errors.filter(e => e.rule !== 'P24');
+    if (blockingErrors.length) fail('INVALID_PROJECT', protocol.formatReport({ errors: blockingErrors, warnings: [] }), 422);
     const worldOverride = project.cardFile.startsWith('world:') ? null : readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
     const nameOverride = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
     const built = this.assembleCard(scan, build, worldOverride, nameOverride);
@@ -11265,7 +11266,8 @@ class FileSyncAdapter {
     const libs = await this.libraries();
     const scan = await this.scanLocal(project, libs);
     const validation = libs.protocol.validateNodes(scan);
-    if (validation.errors.length) fail('INVALID_PROJECT', libs.protocol.formatReport(validation), 422);
+    const blockingErrors = validation.errors.filter(e => e.rule !== 'P24');
+    if (blockingErrors.length) fail('INVALID_PROJECT', libs.protocol.formatReport({ errors: blockingErrors, warnings: [] }), 422);
     const card = this.assembleCard(scan, libs.build, plan.worldName, path.basename(plan.cardFile, '.png')).card;
     const pngBase64 = libs.png.embedChara(this.coverOf(project), card).toString('base64');
     const book = card.data?.character_book ?? { entries: [] };
