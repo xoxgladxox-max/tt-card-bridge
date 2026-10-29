@@ -2,13 +2,15 @@
 import { createBridgeClient, createJobConsumer } from './client.js';
 import { mountSettings } from './settings.js';
 import { createTavernMutations } from './tavern-mutations.js';
+import { createBrowserSyncRuntime } from './browser-sync.js';
 
 const TAG = '[tt-card-bridge]';
 let known = null;
 let busy = false;
 let panel = null;
-const client = createBridgeClient();
 const mutations = createTavernMutations({ getContext: () => ctx(), refreshCards });
+const browserSync = createBrowserSyncRuntime({ getContext: () => ctx(), mutations, runRenameJob: job => runRenameJob(job) });
+const client = createBridgeClient({ browserSync });
 
 const ctx = () => window.SillyTavern.getContext();
 const tt = () => window.__TAURITAVERN__;

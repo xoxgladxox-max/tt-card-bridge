@@ -6,6 +6,7 @@ export class BridgeError extends Error {
 export function createBridgeClient({
     fetchImpl = (...args) => fetch(...args), configUrl = new URL('./connection.json', import.meta.url),
     getShellCommand = () => globalThis.__TAURI__?.shell?.Command,
+    browserSync = null,
     // 酒馆没有“运行程序”插件时，用 install 登记的 tt-card-bridge:// 链接让 Windows 启动后台（不是开机启动）
     openLaunchUrl = url => {
         const frame = document.createElement('iframe');
@@ -25,10 +26,13 @@ export function createBridgeClient({
                 const config = await response.json();
                 const url = new URL(config.base);
                 if (url.protocol !== 'http:' || url.hostname !== '127.0.0.1' || url.username || url.password || typeof config.token !== 'string' || config.token.length < 32) throw new Error('invalid configuration');
-                return { base: url.origin, token: config.token, launch: config.launch };
+                return { base: url.origin, token: config.token, launch: config.launch, mode: 'shell' };
             } catch {
+                if (browserSync) {
+                    return { base: '浏览器本地文件夹直连', mode: 'browser', browserSync };
+                }
                 configuration = null;
-                throw new BridgeError('首次通过酒馆 Git URL 安装后，请到本扩展文件夹内双击运行一次 install.bat 完成本机同步授权（会先识别环境并询问确认），之后刷新页面点「启动同步」即可。', 'CONFIG_UNAVAILABLE');
+                throw new BridgeError('首次通过酒馆 Git URL 安装后，请点击面板中的「确认安装并选择工作区文件夹」开启本地同步，或运行 tt-card install。', 'CONFIG_UNAVAILABLE');
             }
         })();
         return configuration;
@@ -36,6 +40,12 @@ export function createBridgeClient({
     async function request(operation, payload) {
         if (!Object.hasOwn(ROUTES, operation)) throw new BridgeError('未知后台操作', 'INVALID_OPERATION');
         const config = await connection();
+        if (config.mode === 'browser') {
+            if (operation === 'version') return { version: 1, files: [], cardJob: null, skillJob: null, queueDepth: 0, jobClaim: null };
+            if (operation === 'status') return config.browserSync.status();
+            if (operation === 'control') return config.browserSync.control(payload?.action, payload ?? {});
+            return { ok: true };
+        }
         const [method, endpoint] = ROUTES[operation];
         let response;
         try {
@@ -94,13 +104,16 @@ export function createBridgeClient({
     }
     function startSync() {
         if (!starting) starting = (async () => {
+            const config = await connection();
+            if (config.mode === 'browser') return config.browserSync.startSync();
             const status = await connectForStart();
             return status.paused === false ? status : request('control', { action: 'resume' });
         })().finally(() => { starting = null; });
         return starting;
     }
     return {
-        connectionInfo: async () => ({ base: (await connection()).base, mode: 'shell' }),
+        connectionInfo: async () => { const c = await connection(); return { base: c.base, mode: c.mode ?? 'shell' }; },
+        authorizeWorkspace: async opts => { const c = await connection(); if (c.browserSync) return c.browserSync.authorizeWorkspace(opts); return startSync(); },
         request, startSync,
         status: () => request('status'),
         control: (action, args = {}) => request('control', { ...args, action }),

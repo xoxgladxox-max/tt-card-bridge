@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createBridgeClient, createJobConsumer } from '../extension/client.js';
 import { createTavernMutations } from '../extension/tavern-mutations.js';
+import { createBrowserSyncRuntime } from '../extension/browser-sync.js';
+import { embedChara } from '../src/forge/lib/png.mjs';
 import { sha256Hex, worldDigest } from '../extension/protocol.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -311,7 +313,7 @@ test('installer ships the complete module tree and backs up replaced and removed
     const cardsRoot = path.join(temp, 'cards');
     const env = { ...process.env, TAVERN_USER_DIR: userDir, TT_BRIDGE_TOKEN: TOKEN, TT_BRIDGE_PORT: '18789', TT_BRIDGE_CARDS_ROOT: cardsRoot };
     execFileSync(process.execPath, ['bin/tt-card.mjs', 'install'], { cwd: ROOT, env });
-    for (const name of ['manifest.json', 'index.js', 'client.js', 'settings.js', 'protocol.js', 'tavern-mutations.js', 'style.css']) {
+    for (const name of ['manifest.json', 'index.js', 'client.js', 'settings.js', 'protocol.js', 'tavern-mutations.js', 'browser-sync.js', 'style.css']) {
         assert.equal(fs.readFileSync(path.join(extension, name), 'utf8'), fs.readFileSync(path.join(ROOT, 'extension', name), 'utf8'));
     }
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(extension, 'connection.json'), 'utf8')), {
@@ -340,4 +342,164 @@ test('install --check is strictly read-only and reports environment and missing 
     assert.match(out, /酒馆扩展未安装/);
     assert.equal(fs.existsSync(extension), false);
 });
+
+function createMockDirectoryHandle(name = '我的卡工程') {
+    const dirs = new Map();
+    const files = new Map();
+    return {
+        kind: 'directory',
+        name,
+        _dirs: dirs,
+        _files: files,
+        async queryPermission() { return 'granted'; },
+        async requestPermission() { return 'granted'; },
+        async *entries() {
+            for (const [k, v] of dirs.entries()) yield [k, v];
+            for (const [k, v] of files.entries()) {
+                yield [k, {
+                    kind: 'file',
+                    name: k,
+                    async getFile() {
+                        return {
+                            name: k,
+                            size: v.bytes.byteLength,
+                            lastModified: v.lastModified,
+                            async arrayBuffer() { return v.bytes.buffer.slice(v.bytes.byteOffset, v.bytes.byteOffset + v.bytes.byteLength); },
+                        };
+                    },
+                }];
+            }
+        },
+        async getDirectoryHandle(childName, { create = false } = {}) {
+            if (!dirs.has(childName)) {
+                if (!create) throw new Error(`Directory not found: ${childName}`);
+                dirs.set(childName, createMockDirectoryHandle(childName));
+            }
+            return dirs.get(childName);
+        },
+        async getFileHandle(fileName, { create = false } = {}) {
+            if (!files.has(fileName)) {
+                if (!create) throw new Error(`File not found: ${fileName}`);
+                files.set(fileName, { bytes: new Uint8Array(0), lastModified: Date.now() });
+            }
+            return {
+                kind: 'file',
+                name: fileName,
+                async createWritable() {
+                    let pending = new Uint8Array(0);
+                    return {
+                        async write(chunk) { pending = new Uint8Array(chunk); },
+                        async close() { files.set(fileName, { bytes: pending, lastModified: Date.now() + 1 }); },
+                    };
+                },
+                async getFile() {
+                    const f = files.get(fileName);
+                    return {
+                        name: fileName,
+                        size: f.bytes.byteLength,
+                        lastModified: f.lastModified,
+                        async arrayBuffer() { return f.bytes.buffer.slice(f.bytes.byteOffset, f.bytes.byteOffset + f.bytes.byteLength); },
+                    };
+                },
+            };
+        },
+        async removeEntry(entryName) {
+            dirs.delete(entryName);
+            files.delete(entryName);
+        },
+    };
+}
+
+test('browser-sync runtime prompts user confirmation first, then unpacks and syncs via FileSystemDirectoryHandle without install.bat', async () => {
+    let pickerCalls = 0;
+    const mockDir = createMockDirectoryHandle('测试工作区');
+    const prevWindow = globalThis.window;
+    globalThis.window = {
+        ...(prevWindow ?? {}),
+        showDirectoryPicker: async () => {
+            pickerCalls += 1;
+            return mockDir;
+        },
+    };
+    try {
+        const blankPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+        let currentDesc = '初始设定正文';
+        const makeCardPng = () => embedChara(blankPng, {
+            spec: 'chara_card_v2',
+            spec_version: '2.0',
+            data: {
+                name: '测试角色',
+                description: currentDesc,
+                personality: '',
+                scenario: '',
+                first_mes: '你好！',
+                mes_example: '',
+                creator_notes: '',
+                system_prompt: '',
+                post_history_instructions: '',
+                alternate_greetings: [],
+                tags: [],
+                creator: '',
+                character_version: '',
+                extensions: {},
+            },
+        });
+        const pushedJobs = [];
+        const getContext = () => ({
+            characterId: 0,
+            characters: [{ name: '测试角色', avatar: '测试角色.png', description: currentDesc, first_mes: '你好！', data: { name: '测试角色', description: currentDesc, first_mes: '你好！', extensions: {} } }],
+            getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
+        });
+        const browserSync = createBrowserSyncRuntime({
+            getContext,
+            mutations: {
+                create: async job => ({ id: job.id, created: true, avatar: job.avatar }),
+                runCard: async job => {
+                    pushedJobs.push(job);
+                    currentDesc = job.card.data.description;
+                    return { id: job.id };
+                },
+                runWorld: async job => ({ id: job.id }),
+            },
+            runRenameJob: async job => ({ id: job.id, avatar: job.avatar }),
+            fetchImpl: async url => {
+                if (String(url).startsWith('/characters/')) return new Response(makeCardPng(), { status: 200 });
+                return new Response('{}', { status: 404 });
+            },
+        });
+        const client = createBridgeClient({
+            fetchImpl: async () => new Response('missing', { status: 404 }),
+            browserSync,
+        });
+
+        // 1. 首次查询状态：抛出 SETUP_CONFIRM_REQUIRED 供面板展示确认按钮，不擅自调用 showDirectoryPicker
+        await assert.rejects(client.status(), err => err.code === 'SETUP_CONFIRM_REQUIRED' && /是否现在启用/.test(err.message));
+        assert.equal(pickerCalls, 0);
+
+        // 2. 用户点击「确认启用（选择本地工作区文件夹）」后：调用 showDirectoryPicker 并进入实时同步
+        const status1 = await client.authorizeWorkspace({ pickNew: true });
+        assert.equal(pickerCalls, 1);
+        assert.equal(status1.paused, false);
+        assert.equal(status1.cardsRoot, '本地文件夹：测试工作区');
+
+        // 3. 在浏览器端直接拆解当前卡到本地文件夹句柄
+        await client.control('attach', { cardFile: '测试角色.png', keep: [] });
+        assert.equal(mockDir._dirs.has('测试角色'), true);
+        const cardDir = mockDir._dirs.get('测试角色');
+        assert.equal(cardDir._files.has('card.md'), true);
+        assert.equal(cardDir._files.has('description.md'), true);
+
+        // 4. 修改本地文件夹中的 description.md，下次 status() 轮询自动检测并同步回酒馆
+        const descEntry = cardDir._files.get('description.md');
+        const oldText = new TextDecoder().decode(descEntry.bytes);
+        const newText = oldText.replace('初始设定正文', '修改后的设定正文');
+        cardDir._files.set('description.md', { bytes: new TextEncoder().encode(newText), lastModified: Date.now() + 5000 });
+        await client.status();
+        assert.equal(pushedJobs.length, 1);
+        assert.equal(pushedJobs[0].card.data.description, '修改后的设定正文');
+    } finally {
+        globalThis.window = prevWindow;
+    }
+});
+
 

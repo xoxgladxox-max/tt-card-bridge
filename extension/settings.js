@@ -121,7 +121,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     const find = role => root.querySelector(`[data-role="${role}"]`);
     const action = name => root.querySelector(`[data-action="${name}"]`);
     let connection = null, state = null, busy = false, refreshing = false, projectSignature = '', worldSignature = '';
-    let lastError = '', lastPolled = 0, actionFailed = false, lastFollowedCard = undefined, lastFollowedWorld = undefined, scannedCard = null, conflictShownFor = '';
+    let lastError = '', lastPolled = 0, actionFailed = false, lastFollowedCard = undefined, lastFollowedWorld = undefined, scannedCard = null, conflictShownFor = '', setupDismissed = false;
     const selectedProject = () => state?.assembleProjects?.find(project => project.id === find('projects').value) ?? state?.projects?.find(project => project.id === find('projects').value);
     // ② 用：下拉没选中时，工作区目录里只有一张卡就用那张
     const assembleTarget = () => selectedProject() || (state?.assembleProjects?.length === 1 ? state.assembleProjects[0] : null);
@@ -137,7 +137,52 @@ export function mountSettings({ client, getContext, refreshCards }) {
         return option.textContent?.trim() || null;
     };
     const confirmAction = message => typeof window.confirm === 'function' ? window.confirm(message) : true;
+    function showSetupConfirmPrompt(error) {
+        const isPerm = error?.code === 'FOLDER_PERMISSION_REQUIRED';
+        const sig = `setup|${error?.code}|${error?.details?.folderName ?? ''}`;
+        if (conflictShownFor === sig) return;
+        conflictShownFor = sig;
+        find('error').hidden = true;
+        const box = find('diff');
+        box.replaceChildren();
+        box.append(element('p', isPerm
+            ? `检测到上次的工作区文件夹「${error?.details?.folderName ?? ''}」。是否允许读写并开启实时同步？`
+            : '首次安装提示：检测到尚未配置本地卡工程工作区。是否现在启用？（将使用内置拆装卡模块，并在您选择的本地文件夹下读写 .md 卡工程文件，无需运行外部脚本）', 'ttcb-warning'));
+        const row = element('div', undefined, 'flex-container');
+        if (isPerm) {
+            row.append(button('确认允许读写', () => run(async () => {
+                setupDismissed = false;
+                state = await client.authorizeWorkspace({ pickNew: false });
+                await checkCardFollow({ force: true });
+                done(`已恢复工作区连接（${state.cardsRoot}），实时同步已开启。`);
+            })));
+            row.append(button('更换工作区文件夹', () => run(async () => {
+                setupDismissed = false;
+                state = await client.authorizeWorkspace({ pickNew: true });
+                await checkCardFollow({ force: true });
+                done(`已切换工作区至「${state.cardsRoot}」，实时同步已开启。`);
+            })));
+        } else {
+            row.append(button('确认启用（选择本地工作区文件夹）', () => run(async () => {
+                setupDismissed = false;
+                state = await client.authorizeWorkspace({ pickNew: true });
+                await checkCardFollow({ force: true });
+                done(`已启用本地卡工程同步（${state.cardsRoot}），现在可以点「拆解当前卡」或「连接」。`);
+            })));
+            row.append(button('暂不启用', () => {
+                setupDismissed = true;
+                conflictShownFor = '';
+                box.replaceChildren(element('small', '已暂缓启用。需要时可随时点击上方「启动同步」选择本地工作区文件夹。', 'ttcb-dim'));
+                find('status').textContent = '尚未启用（点「启动同步」选择工作区文件夹）';
+            }));
+        }
+        box.append(row);
+    }
     function showError(error) {
+        if (error?.code === 'SETUP_CONFIRM_REQUIRED' || error?.code === 'FOLDER_PERMISSION_REQUIRED') {
+            if (!setupDismissed) showSetupConfirmPrompt(error);
+            return;
+        }
         if (actionFailed && error?.code === 'CONNECTION_FAILED') return;
         lastError = errorText(error);
         find('error').textContent = lastError;
@@ -223,7 +268,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
         for (const control of root.querySelectorAll('button')) control.disabled = busy && control.dataset.action !== 'logs-toggle';
         action('toggle').disabled = busy;
         setLabel(action('toggle'), state?.paused === false ? '暂停同步' : '启动同步');
-        action('set-cards-root').disabled = busy || !state;
+        action('set-cards-root').disabled = busy || (!state && connection?.mode !== 'browser');
         action('skills-status').disabled = busy || !state;
         action('skills-deploy').disabled = busy || !state;
         action('attach').disabled = busy || !state || !currentCard();
@@ -356,11 +401,18 @@ export function mountSettings({ client, getContext, refreshCards }) {
             connection = await client.connectionInfo();
             find('connection').textContent = connection.base;
             state = await client.status();
+            if (conflictShownFor.startsWith('setup|')) { find('diff').replaceChildren(); conflictShownFor = ''; }
             find('status').textContent = `已连接 · ${state.paused ? '自动同步已暂停' : '实时同步中'}${state.currentTask ? ' · 正在处理' : ''}`;
-            if (!actionFailed && (lastError.startsWith('本机后台未连接') || lastError.startsWith('缺少有效的本机连接配置'))) showError('');
+            if (!actionFailed && (lastError.startsWith('本机后台未连接') || lastError.startsWith('缺少有效的本机连接配置') || lastError.startsWith('首次通过酒馆'))) showError('');
         } catch (error) {
             state = null;
-            find('status').textContent = '后台未连接，点「启动同步」';
+            if (error?.code === 'SETUP_CONFIRM_REQUIRED' || error?.code === 'FOLDER_PERMISSION_REQUIRED') {
+                find('status').textContent = setupDismissed
+                    ? '尚未启用（点「启动同步」选择工作区文件夹）'
+                    : (error.code === 'FOLDER_PERMISSION_REQUIRED' ? '等待确认恢复工作区文件夹读写权限…' : '首次使用：请在下方确认是否启用本地工作区同步');
+            } else {
+                find('status').textContent = '后台未连接，点「启动同步」';
+            }
             if (!actionFailed) showError(error);
         } finally { refreshing = false; renderState(); }
     }
@@ -395,9 +447,12 @@ export function mountSettings({ client, getContext, refreshCards }) {
         // 手动刷新：读状态，并把酒馆当前打开的卡重新告诉后台，漏掉的切卡在这里补上
         refresh: async () => { await refresh(); await checkCardFollow({ force: true }); },
         toggle: async () => {
+            setupDismissed = false;
             if (state?.paused === false) return client.control('pause');
-            find('status').textContent = '正在启动并连接同步后台…';
-            return client.startSync();
+            find('status').textContent = connection?.mode === 'browser' ? '正在打开文件夹选择并开启同步…' : '正在启动并连接同步后台…';
+            const res = await client.startSync();
+            await checkCardFollow({ force: true });
+            return res;
         },
         connect: async () => {
             const p = assembleTarget() || (state?.projects?.length === 1 ? state.projects[0] : null);
@@ -431,6 +486,15 @@ export function mountSettings({ client, getContext, refreshCards }) {
             find('diff').replaceChildren(element('p', `已把世界书「${worldName}」拆到工作区「${worldName}」，已开启实时双向同步。`));
         },
         'set-cards-root': async () => {
+            if (connection?.mode === 'browser') {
+                setupDismissed = false;
+                const res = await client.authorizeWorkspace({ pickNew: true });
+                find('cards-root-input').value = res.cardsRoot;
+                clearPreviews();
+                await checkCardFollow({ force: true });
+                find('diff').replaceChildren(element('p', `已切换本地工作区文件夹至：${res.cardsRoot}`));
+                return;
+            }
             const cardsRoot = find('cards-root-input').value.trim();
             if (!cardsRoot) throw new Error('请填写要切换的工作区目录路径。');
             const res = await client.control('setCardsRoot', { cardsRoot });
