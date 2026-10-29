@@ -1,0 +1,11 @@
+{
+  "display_name": "tt-card-bridge（卡工程同步设置）",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "extension/index.js",
+  "css": "extension/style.css",
+  "author": "card-workspace",
+  "version": "0.2.0-dev",
+  "auto_update": true
+}

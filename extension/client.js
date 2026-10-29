@@ -28,7 +28,7 @@ export function createBridgeClient({
                 return { base: url.origin, token: config.token, launch: config.launch };
             } catch {
                 configuration = null;
-                throw new BridgeError('缺少有效的本机连接配置。请关闭酒馆并重新运行 tt-card install，安装器会自动配置，无需粘贴令牌。', 'CONFIG_UNAVAILABLE');
+                throw new BridgeError('首次通过酒馆 Git URL 安装后，请到本扩展文件夹内双击运行一次 install.bat 完成本机同步授权（会先识别环境并询问确认），之后刷新页面点「启动同步」即可。', 'CONFIG_UNAVAILABLE');
             }
         })();
         return configuration;

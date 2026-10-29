@@ -28,18 +28,24 @@ export function saveLocalBridgeConfig(patch) {
   return next;
 }
 
+const isInsideTavernExtensions = () => {
+  const p1 = path.basename(path.dirname(ROOT)).toLowerCase();
+  const p2 = path.basename(path.resolve(ROOT, '..', '..')).toLowerCase();
+  return p1 === 'extensions' || (p1 === 'third-party' && p2 === 'extensions');
+};
+
 export function resolveCardsRoot(override) {
   if (override) return path.resolve(ROOT, override);
   if (process.env.TT_BRIDGE_CARDS_ROOT) return path.resolve(ROOT, process.env.TT_BRIDGE_CARDS_ROOT);
   const cfg = readBridgeConfig();
-  if (cfg.cardsRoot) {
+  if (cfg.cardsRoot && !(cfg.cardsRoot === './cards' && isInsideTavernExtensions())) {
     const candidate = path.resolve(ROOT, cfg.cardsRoot);
-    // 如果写的是本仓库相对路径，或磁盘上真实存在该目录（或其父目录存在），则采用；否则回退到仓库内 ./cards
+    // 如果写的是本仓库相对路径，或磁盘上真实存在该目录（或其父目录存在），则采用；否则回退到默认 cards 目录
     if (!path.isAbsolute(cfg.cardsRoot) || fs.existsSync(candidate) || fs.existsSync(path.dirname(candidate))) {
       return candidate;
     }
   }
-  return path.join(ROOT, 'cards');
+  return isInsideTavernExtensions() ? path.join(tavernDataRoot(), 'cards') : path.join(ROOT, 'cards');
 }
 
 export function resolveSkillsRoot(override) {
@@ -52,7 +58,7 @@ export function resolveSkillsRoot(override) {
 function autoDetectNativeSillyTavern() {
   // 1. 如果插件被直接克隆在 SillyTavern/data/<user>/extensions/tt-card-bridge 下
   const p2 = path.resolve(ROOT, '..', '..');
-  if (fs.existsSync(path.join(p2, 'characters')) && fs.existsSync(path.join(p2, 'worlds'))) return p2;
+  if (fs.existsSync(path.join(p2, 'characters')) && fs.existsSync(path.join(p2, 'worlds')) && !fs.existsSync(path.join(path.dirname(p2), '_tauritavern'))) return p2;
   // 2. 如果被克隆在 SillyTavern/public/scripts/extensions/third-party/tt-card-bridge 下
   const p4 = path.resolve(ROOT, '..', '..', '..', '..');
   if (fs.existsSync(path.join(p4, 'data', 'default-user', 'characters'))) return path.join(p4, 'data', 'default-user');
@@ -103,7 +109,7 @@ export function detectTavernEnvironment() {
       label: '普通酒馆（原生 SillyTavern）',
       dataRoot: path.dirname(explicitUser),
       userDir: explicitUser,
-      extDst: path.join(explicitUser, 'extensions', 'tt-card-bridge'),
+      extDst: isInsideTavernExtensions() ? ROOT : path.join(explicitUser, 'extensions', 'tt-card-bridge'),
       candidates,
     };
   }
@@ -115,7 +121,7 @@ export function detectTavernEnvironment() {
       label: 'TauriTavern',
       dataRoot: ttRoot,
       userDir,
-      extDst: path.join(ttRoot, 'extensions', 'third-party', 'tt-card-bridge'),
+      extDst: isInsideTavernExtensions() ? ROOT : path.join(ttRoot, 'extensions', 'third-party', 'tt-card-bridge'),
       candidates,
     };
   }
@@ -126,7 +132,7 @@ export function detectTavernEnvironment() {
       label: '普通酒馆（原生 SillyTavern）',
       dataRoot: path.dirname(autoStUser),
       userDir: autoStUser,
-      extDst: path.join(autoStUser, 'extensions', 'tt-card-bridge'),
+      extDst: isInsideTavernExtensions() ? ROOT : path.join(autoStUser, 'extensions', 'tt-card-bridge'),
       candidates,
     };
   }

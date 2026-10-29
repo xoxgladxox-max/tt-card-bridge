@@ -1,4 +1,6 @@
 node_modules/
 .runtime/
 config.json
+connection.json
+extension/connection.json
 /templates/card-folder-AGENTS.md
