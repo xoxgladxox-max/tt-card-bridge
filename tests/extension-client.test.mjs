@@ -313,10 +313,11 @@ test('installer ships the complete module tree and backs up replaced and removed
     const cardsRoot = path.join(temp, 'cards');
     const env = { ...process.env, TAVERN_USER_DIR: userDir, TT_BRIDGE_TOKEN: TOKEN, TT_BRIDGE_PORT: '18789', TT_BRIDGE_CARDS_ROOT: cardsRoot };
     execFileSync(process.execPath, ['bin/tt-card.mjs', 'install'], { cwd: ROOT, env });
-    for (const name of ['manifest.json', 'index.js', 'client.js', 'settings.js', 'protocol.js', 'tavern-mutations.js', 'browser-sync.js', 'style.css']) {
-        assert.equal(fs.readFileSync(path.join(extension, name), 'utf8'), fs.readFileSync(path.join(ROOT, 'extension', name), 'utf8'));
+    assert.equal(fs.readFileSync(path.join(extension, 'manifest.json'), 'utf8'), fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+    for (const name of ['index.js', 'client.js', 'settings.js', 'protocol.js', 'tavern-mutations.js', 'browser-sync.js', 'style.css']) {
+        assert.equal(fs.readFileSync(path.join(extension, 'extension', name), 'utf8'), fs.readFileSync(path.join(ROOT, 'extension', name), 'utf8'));
     }
-    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(extension, 'connection.json'), 'utf8')), {
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(extension, 'extension', 'connection.json'), 'utf8')), {
         base: 'http://127.0.0.1:18789', token: TOKEN,
         launch: { script: path.join(ROOT, 'src', 'mirror.mjs'), cardsRoot, cwd: ROOT, url: 'tt-card-bridge://start' },
     });

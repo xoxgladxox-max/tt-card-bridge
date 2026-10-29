@@ -41,7 +41,7 @@ function readInstalledExtVersion(extDst) {
 }
 
 function readSourceExtVersion() {
-  try { return JSON.parse(fs.readFileSync(path.join(EXT_SRC, 'manifest.json'), 'utf8')).version; }
+  try { return JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8')).version; }
   catch { return '0.2.0-dev'; }
 }
 
@@ -71,8 +71,7 @@ export function inspectEnvironment() {
   const env = detectTavernEnvironment();
   const vbsPath = path.join(ROOT, '.runtime', 'start-silent.vbs');
   const connFile = path.join(ROOT, '.runtime', 'connection.json');
-  const inPlace = path.resolve(env.extDst).toLowerCase() === path.resolve(ROOT).toLowerCase();
-  const extConnFile = inPlace ? path.join(ROOT, 'extension', 'connection.json') : path.join(env.extDst, 'connection.json');
+  const extConnFile = path.join(env.extDst, 'extension', 'connection.json');
   const srcVer = readSourceExtVersion();
   const instVer = readInstalledExtVersion(env.extDst);
   const yamlOk = hasDependencyYaml();
@@ -244,14 +243,15 @@ function installExtension(extDst, dataRoot, cardsRoot) {
   const inPlace = path.resolve(extDst).toLowerCase() === path.resolve(ROOT).toLowerCase();
   if (inPlace) {
     // 通过酒馆「输入扩展程序的 Git URL 以安装」直接克隆在 extensions/tt-card-bridge 下：原地写入连接配置，不删自身目录
-    fs.writeFileSync(path.join(ROOT, 'connection.json'), connPayload, { mode: 0o600 });
     fs.writeFileSync(path.join(EXT_SRC, 'connection.json'), connPayload, { mode: 0o600 });
     return { token, launch };
   }
   backupExtension(extDst, dataRoot);
   fs.rmSync(extDst, { recursive: true, force: true });
-  copyTree(EXT_SRC, extDst);
-  fs.writeFileSync(path.join(extDst, 'connection.json'), connPayload, { mode: 0o600 });
+  fs.mkdirSync(extDst, { recursive: true });
+  fs.copyFileSync(path.join(ROOT, 'manifest.json'), path.join(extDst, 'manifest.json'));
+  copyTree(EXT_SRC, path.join(extDst, 'extension'));
+  fs.writeFileSync(path.join(extDst, 'extension', 'connection.json'), connPayload, { mode: 0o600 });
   return { token, launch };
 }
 
