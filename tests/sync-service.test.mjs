@@ -544,3 +544,35 @@ test('realtime watcher and changeStamp trigger automatic sync when local or tave
   await new Promise(r => setTimeout(r, 120));
   assert.equal(readCardPng(f.pngPath).data.description, 'realtime edit');
 });
+test('handles duplicate-named cards, missing bound worldbook fallback, trailing-space world names, and character_book.description', async t => {
+  const f = await fileFixture(t, true);
+  // 1. 同名卡 A1.png（卡内 data.name 仍为 'A'，且 character_book 含 description，extensions.world 指向不存在的世界书，回退使用内嵌世界书）
+  const dupCard = structuredClone(readCardPng(f.pngPath));
+  dupCard.data.name = 'A';
+  dupCard.data.extensions = { world: 'MissingWorldBook ' };
+  dupCard.data.character_book = {
+    name: 'MissingWorldBook',
+    description: '世界书级说明文本',
+    entries: [{ id: 7, keys: ['k'], secondary_keys: [], comment: '内嵌条目', content: '内嵌正文', constant: false, selective: true, insertion_order: 100, enabled: true, position: 'before_char', extensions: { position: 0, depth: 4, role: 0 } }],
+  };
+  const dupPngPath = path.join(f.userDir, 'characters', 'A1.png');
+  fs.writeFileSync(dupPngPath, embedChara(basePng, dupCard));
+
+  // 同时拆解 A.png 和同名卡 A1.png，互不冲突
+  const p0 = await f.service.control({ action: 'attach', cardFile: 'A.png' });
+  const p1 = await f.service.control({ action: 'attach', cardFile: 'A1.png' });
+  assert.equal(p0.id, 'A');
+  assert.equal(p1.id, 'A1');
+  assert.equal((await f.service.control({ action: 'check', projectId: 'A1' })).results[0].diff.clean, true);
+
+  // 2. 世界书名末尾带空格（extensions.world = 'Book ' 匹配 worlds/Book.json）
+  const spaceCard = structuredClone(readCardPng(f.pngPath));
+  spaceCard.data.name = 'A';
+  spaceCard.data.extensions = { world: 'Book ' };
+  const spacePngPath = path.join(f.userDir, 'characters', 'A2.png');
+  fs.writeFileSync(spacePngPath, embedChara(basePng, spaceCard));
+  const p2 = await f.service.control({ action: 'attach', cardFile: 'A2.png' });
+  assert.equal(p2.id, 'A2');
+  assert.equal((await f.service.control({ action: 'check', projectId: 'A2' })).results[0].diff.clean, true);
+});
+

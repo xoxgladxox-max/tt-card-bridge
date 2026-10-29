@@ -107,15 +107,39 @@ export function readSlotsFromCard(card, { worldRaw = null } = {}) {
   return { slots };
 }
 
+export function tryWorldFilePath(name, userDir = tavernUserDir()) {
+  if (typeof name !== 'string') return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  for (const cand of [name, trimmed]) {
+    try {
+      const p = contained(path.join(userDir, 'worlds'), `${segment(cand, '世界书名')}.json`);
+      if (fs.existsSync(p)) return { worldName: trimmed, filePath: p, exists: true };
+    } catch { /* ignore invalid segment */ }
+  }
+  try {
+    const p = contained(path.join(userDir, 'worlds'), `${segment(trimmed, '世界书名')}.json`);
+    return { worldName: trimmed, filePath: p, exists: false };
+  } catch {
+    return null;
+  }
+}
+
 export function readSlotsFromTavern(cardFile, { userDir = tavernUserDir(), requireWorld = false } = {}) {
   if (cardFile.startsWith('world:')) return readSlotsFromWorldBook(cardFile.slice(6), { userDir });
   segment(cardFile, '卡文件名');
   const png = fs.readFileSync(contained(path.join(userDir, 'characters'), cardFile));
   const card = readCardPng(png);
   const d = card.data ?? card;
-  const worldName = d.extensions?.world;
-  const wf = worldName ? contained(path.join(userDir, 'worlds'), `${segment(worldName, '世界书名')}.json`) : null;
-  if (requireWorld && wf && !fs.existsSync(wf)) throw new Error(`绑定世界书不存在：${worldName}`);
+  const rawWorldName = typeof d.extensions?.world === 'string' ? d.extensions.world : '';
+  const trimmedWorldName = rawWorldName.trim();
+  if (typeof d.extensions?.world === 'string' && d.extensions.world !== trimmedWorldName) {
+    d.extensions.world = trimmedWorldName;
+  }
+  const resolved = trimmedWorldName ? tryWorldFilePath(rawWorldName, userDir) : null;
+  const worldName = resolved ? resolved.worldName : (trimmedWorldName || '');
+  const wf = resolved?.filePath ?? null;
+  if (requireWorld && trimmedWorldName && (!wf || !fs.existsSync(wf))) throw new Error(`绑定世界书不存在：${trimmedWorldName}`);
   let source, worldRaw = null;
   if (wf && fs.existsSync(wf)) {
     worldRaw = fs.readFileSync(wf, 'utf8');
@@ -127,7 +151,7 @@ export function readSlotsFromTavern(cardFile, { userDir = tavernUserDir(), requi
 }
 
 // 独立世界书（不属于任何卡）：只有条目槽位。卡标识写成 world:<世界书名>，同步记录也用它
-export const worldFilePath = (name, userDir = tavernUserDir()) => contained(path.join(userDir, 'worlds'), `${segment(name, '世界书名')}.json`);
+export const worldFilePath = (name, userDir = tavernUserDir()) => contained(path.join(userDir, 'worlds'), `${segment(typeof name === 'string' ? name.trim() : name, '世界书名')}.json`);
 export function readSlotsFromWorldBook(worldName, { userDir = tavernUserDir() } = {}) {
   const wf = worldFilePath(worldName, userDir);
   if (!fs.existsSync(wf)) throw new Error(`酒馆里没有这本世界书：${wf}`);

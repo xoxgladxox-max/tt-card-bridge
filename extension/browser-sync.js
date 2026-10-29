@@ -9159,7 +9159,7 @@ function parseNodeFile(raw, relPath) {
     return { frontmatter, body, problems, status: null, confirm: null, loose: true };
   } else {
     try {
-      frontmatter = YAML.parse(quoteBarePosition(fmMatch[1])) ?? {};
+      frontmatter = YAML.parse(quoteBarePosition(fmMatch[1]), { logLevel: 'error' }) ?? {};
       if (typeof frontmatter !== 'object' || Array.isArray(frontmatter)) {
         problems.push({ rule: 'P0', message: 'frontmatter 不是键值表' });
         frontmatter = {};
@@ -9742,10 +9742,11 @@ function entryFromNode(n, displayIndex, order) {
 // tavern 段：从酒馆旧卡拆出来、节点协议没有对应字段的设置（如 scan_depth、probability、enabled），原样盖在装配结果上。
 // 只盖设置，不盖正文：content 与单槽文字字段始终以 <!-- body --> 为准。
 const BODY_ONLY = new Set(['content', 'description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions', 'alternate_greetings', 'character_book']);
-function applyOverride(obj, ov) {
+const BOOK_BODY_ONLY = new Set(['entries']);
+function applyOverride(obj, ov, skipKeys = BODY_ONLY) {
   if (!ov || typeof ov !== 'object') return obj;
   for (const [k, v] of Object.entries(ov)) {
-    if (BODY_ONLY.has(k)) continue;
+    if (skipKeys.has(k)) continue;
     if (k === 'extensions' && v && typeof v === 'object' && !Array.isArray(v)) obj.extensions = { ...(obj.extensions ?? {}), ...v };
     else obj[k] = v;
   }
@@ -9797,7 +9798,7 @@ function assemble(scan, opts = {}) {
   let bodyMeta = null;
   if (card?.body?.trim()) {
     try {
-      const parsed = YAML.parse(card.body);
+      const parsed = YAML.parse(card.body, { logLevel: 'error' });
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) bodyMeta = parsed;
     } catch { /* body 不是 YAML 时忽略 */ }
   }
@@ -9813,7 +9814,7 @@ function assemble(scan, opts = {}) {
       name: bookName,
       entries: bookSorted.map((n, i) => entryWithOverride(n, i, orders.get(n))),
     };
-    applyOverride(data.character_book, card?.frontmatter?.tavern?.book);
+    applyOverride(data.character_book, card?.frontmatter?.tavern?.book, BOOK_BODY_ONLY);
   } else if (card?.frontmatter?.tavern?.data && Object.hasOwn(card.frontmatter.tavern.data, 'character_book') && card.frontmatter.tavern.data.character_book === null) {
     data.character_book = null;
   }
@@ -10230,9 +10231,19 @@ async function unpackCmd(file, opts = {}) {
   // 世界书条目：拆的时候分不出类型，先记 lore；一条一个 world_book/<条目名>.md
   const entries = d.character_book?.entries ?? [];
   const used = new Set();
+  const usedNodeIds = new Set();
+  const usedEntryIds = new Set();
   const entryNode = new Map(); // 原条目 → 相对路径
   for (const [i, e] of entries.entries()) {
-    const nodeId = `wb-${e.id ?? i}`;
+    if (e.id === undefined || e.id === null || e.id === '' || usedEntryIds.has(String(e.id))) {
+      let nextId = typeof e.id === 'number' && Number.isFinite(e.id) ? e.id : i;
+      while (usedEntryIds.has(String(nextId))) nextId++;
+      e.id = nextId;
+    }
+    usedEntryIds.add(String(e.id));
+    let nodeId = `wb-${e.id ?? i}`;
+    for (let suffix = 2; usedNodeIds.has(nodeId); suffix++) nodeId = `wb-${e.id ?? i}-${suffix}`;
+    usedNodeIds.add(nodeId);
     const rel = `world_book/${safeDirName(e.comment || nodeId, used)}.md`;
     const text = String(e.content ?? '');
     if (!bodyRoundTrips(text)) notes.push(`条目「${e.comment}」：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
@@ -10459,15 +10470,39 @@ function readSlotsFromCard(card, { worldRaw = null } = {}) {
   return { slots };
 }
 
+function tryWorldFilePath(name, userDir = tavernUserDir()) {
+  if (typeof name !== 'string') return null;
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  for (const cand of [name, trimmed]) {
+    try {
+      const p = contained(path.join(userDir, 'worlds'), `${segment(cand, '世界书名')}.json`);
+      if (fs.existsSync(p)) return { worldName: trimmed, filePath: p, exists: true };
+    } catch { /* ignore invalid segment */ }
+  }
+  try {
+    const p = contained(path.join(userDir, 'worlds'), `${segment(trimmed, '世界书名')}.json`);
+    return { worldName: trimmed, filePath: p, exists: false };
+  } catch {
+    return null;
+  }
+}
+
 function readSlotsFromTavern(cardFile, { userDir = tavernUserDir(), requireWorld = false } = {}) {
   if (cardFile.startsWith('world:')) return readSlotsFromWorldBook(cardFile.slice(6), { userDir });
   segment(cardFile, '卡文件名');
   const png = fs.readFileSync(contained(path.join(userDir, 'characters'), cardFile));
   const card = readCardPng(png);
   const d = card.data ?? card;
-  const worldName = d.extensions?.world;
-  const wf = worldName ? contained(path.join(userDir, 'worlds'), `${segment(worldName, '世界书名')}.json`) : null;
-  if (requireWorld && wf && !fs.existsSync(wf)) throw new Error(`绑定世界书不存在：${worldName}`);
+  const rawWorldName = typeof d.extensions?.world === 'string' ? d.extensions.world : '';
+  const trimmedWorldName = rawWorldName.trim();
+  if (typeof d.extensions?.world === 'string' && d.extensions.world !== trimmedWorldName) {
+    d.extensions.world = trimmedWorldName;
+  }
+  const resolved = trimmedWorldName ? tryWorldFilePath(rawWorldName, userDir) : null;
+  const worldName = resolved ? resolved.worldName : (trimmedWorldName || '');
+  const wf = resolved?.filePath ?? null;
+  if (requireWorld && trimmedWorldName && (!wf || !fs.existsSync(wf))) throw new Error(`绑定世界书不存在：${trimmedWorldName}`);
   let source, worldRaw = null;
   if (wf && fs.existsSync(wf)) {
     worldRaw = fs.readFileSync(wf, 'utf8');
@@ -10479,7 +10514,7 @@ function readSlotsFromTavern(cardFile, { userDir = tavernUserDir(), requireWorld
 }
 
 // 独立世界书（不属于任何卡）：只有条目槽位。卡标识写成 world:<世界书名>，同步记录也用它
-const worldFilePath = (name, userDir = tavernUserDir()) => contained(path.join(userDir, 'worlds'), `${segment(name, '世界书名')}.json`);
+const worldFilePath = (name, userDir = tavernUserDir()) => contained(path.join(userDir, 'worlds'), `${segment(typeof name === 'string' ? name.trim() : name, '世界书名')}.json`);
 function readSlotsFromWorldBook(worldName, { userDir = tavernUserDir() } = {}) {
   const wf = worldFilePath(worldName, userDir);
   if (!fs.existsSync(wf)) throw new Error(`酒馆里没有这本世界书：${wf}`);
@@ -10523,7 +10558,7 @@ function pendingStatus(projDir, state, tavernSlots) {
   return { resolved, open };
 }
 
-return { forge, extrasLib, stableJson, extraSlots, extraOrder, slotHash, readSlotsFromNodes, attachNodeSettings, readCardPng, readSlotsFromCard, readSlotsFromTavern, worldFilePath, readSlotsFromWorldBook, loadSyncState, saveSyncState, pendingStatus };
+return { forge, extrasLib, stableJson, extraSlots, extraOrder, slotHash, readSlotsFromNodes, attachNodeSettings, readCardPng, readSlotsFromCard, tryWorldFilePath, readSlotsFromTavern, worldFilePath, readSlotsFromWorldBook, loadSyncState, saveSyncState, pendingStatus };
 })();
 
 const __mod_projects = (() => {
@@ -10906,7 +10941,8 @@ class FileSyncAdapter {
   remote(project) {
     const worldOnly = project.cardFile.startsWith('world:');
     if (!worldOnly) segment(project.cardFile, '卡文件名');
-    const tavern = readSlotsFromTavern(project.cardFile, { userDir: this.userDir, requireWorld: true });
+    const hadExternalWorld = Boolean(project.dir && fs.existsSync(path.join(project.dir, '.card-forge', 'originals', 'world.json')));
+    const tavern = readSlotsFromTavern(project.cardFile, { userDir: this.userDir, requireWorld: hadExternalWorld });
     const png = tavern.png ?? null;
     const worldName = tavern.worldName || null;
     const worldRaw = tavern.worldRaw ?? null;
@@ -10963,14 +10999,17 @@ class FileSyncAdapter {
     const worldOverride = project.cardFile.startsWith('world:') ? null : readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
     const fileStem = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
     const remoteName = remote.tavern.card?.data?.name ?? remote.tavern.card?.name ?? null;
-    const nameOverride = fileStem && remoteName === fileStem ? fileStem : null;
+    const cardNodeName = scan.nodes.find(n => n.type === 'card')?.frontmatter?.name ?? project.name;
+    // 仅当「新建卡」因重名自动加了后缀（如工程名与 card.md 都是 A，而酒馆文件名与卡内名都是 A 2）时才用 fileStem 对齐；
+    // 其余情况（如二次导入卡「配种法案1.png」卡内名为「配种法案」、多张同名卡、或在 card.md 手动改了角色名）一律以 card.md 的 name 为准
+    const nameOverride = fileStem && remoteName === fileStem && cardNodeName === project.name && fileStem !== cardNodeName ? fileStem : null;
     const built = this.assembleCard(scan, build, worldOverride, nameOverride);
     const nodes = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan);
     for (const [key, slot] of Object.entries(nodes.slots)) if (key.startsWith('entry:') && isWorldEntryPath(slot.relPath)) slot.newEntryEligible = true;
     const targetWorld = built.card.data?.extensions?.world || null;
     if (targetWorld && targetWorld !== remote.worldName) {
-      const target = worldFilePath(targetWorld, this.userDir);
-      remote.expected.targetWorld = { name: targetWorld, hash: fs.existsSync(target) ? hashObject(readJson(target)) : null };
+      const target = tryWorldFilePath(targetWorld, this.userDir)?.filePath ?? null;
+      remote.expected.targetWorld = { name: targetWorld, hash: target && fs.existsSync(target) ? hashObject(readJson(target)) : null };
     }
     const { open, resolved } = pendingStatus(project.dir, baseline, remote.tavern.slots);
     const issues = [];
@@ -11204,7 +11243,7 @@ class FileSyncAdapter {
       card = info(file);
       try { worldName = readCardPng(file)?.data?.extensions?.world || null; } catch { worldName = null; }
     }
-    const world = worldName ? info(worldFilePath(worldName, this.userDir)) : null;
+    const world = worldName ? info(tryWorldFilePath(worldName, this.userDir)?.filePath ?? '') : null;
     return hashObject({ local, bridge, card, worldName, world });
   }
   // 只按参与同步的文件计算：根目录放笔记、草稿、调研不会触发同步检查
@@ -12115,7 +12154,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           __vfsFiles.set(`/tavern/default-user/characters/${avatar}`, { bytes: buf, mtimeMs: Date.now() });
           try {
             const card = __mod_Slots.readCardPng(buf);
-            const w = card?.data?.extensions?.world;
+            const w = typeof card?.data?.extensions?.world === 'string' ? card.data.extensions.world.trim() : '';
             if (w) wantedWorlds.add(w);
           } catch {}
         }
@@ -12124,18 +12163,54 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
 
     if (service) {
       for (const p of service.projects()) {
-        if (p.cardFile?.startsWith('world:')) wantedWorlds.add(p.cardFile.slice(6));
-        if (p.binding?.worldOverride) wantedWorlds.add(p.binding.worldOverride);
+        if (p.cardFile?.startsWith('world:')) wantedWorlds.add(p.cardFile.slice(6).trim());
+        if (p.binding?.worldOverride) wantedWorlds.add(String(p.binding.worldOverride).trim());
       }
     }
 
-    for (const worldName of wantedWorlds) {
+    let existingWorlds = null;
+    if (wantedWorlds.size > 0) {
+      try {
+        const sRes = await fetchImpl('/api/settings/get', {
+          method: 'POST',
+          headers: st.getRequestHeaders(),
+          body: JSON.stringify({}),
+        });
+        if (sRes.ok) {
+          const settings = await sRes.json();
+          if (Array.isArray(settings?.world_names)) {
+            existingWorlds = new Set(settings.world_names);
+          }
+        }
+      } catch {}
+    }
+
+    if (existingWorlds) {
+      const existingTrimmed = new Set([...existingWorlds].map(x => String(x).trim()));
+      for (const k of [...__vfsFiles.keys()]) {
+        if (k.startsWith('/tavern/default-user/worlds/') && k.endsWith('.json')) {
+          const wName = k.slice('/tavern/default-user/worlds/'.length, -5);
+          if (!existingWorlds.has(wName) && !existingTrimmed.has(wName)) {
+            __vfsFiles.delete(k);
+          }
+        }
+      }
+    }
+
+    for (const rawName of wantedWorlds) {
+      const worldName = typeof rawName === 'string' ? rawName.trim() : '';
       if (!worldName) continue;
+      let queryName = worldName;
+      if (existingWorlds) {
+        if (existingWorlds.has(rawName)) queryName = rawName;
+        else if (existingWorlds.has(worldName)) queryName = worldName;
+        else continue; // 世界书在酒馆中不存在（卡片仅含内嵌 character_book），不写入空文件到 VFS
+      }
       try {
         const res = await fetchImpl('/api/worldinfo/get', {
           method: 'POST',
           headers: st.getRequestHeaders(),
-          body: JSON.stringify({ name: worldName }),
+          body: JSON.stringify({ name: queryName }),
         });
         if (res.ok) {
           const data = await res.json();

@@ -234,9 +234,19 @@ export async function unpackCmd(file, opts = {}) {
   // 世界书条目：拆的时候分不出类型，先记 lore；一条一个 world_book/<条目名>.md
   const entries = d.character_book?.entries ?? [];
   const used = new Set();
+  const usedNodeIds = new Set();
+  const usedEntryIds = new Set();
   const entryNode = new Map(); // 原条目 → 相对路径
   for (const [i, e] of entries.entries()) {
-    const nodeId = `wb-${e.id ?? i}`;
+    if (e.id === undefined || e.id === null || e.id === '' || usedEntryIds.has(String(e.id))) {
+      let nextId = typeof e.id === 'number' && Number.isFinite(e.id) ? e.id : i;
+      while (usedEntryIds.has(String(nextId))) nextId++;
+      e.id = nextId;
+    }
+    usedEntryIds.add(String(e.id));
+    let nodeId = `wb-${e.id ?? i}`;
+    for (let suffix = 2; usedNodeIds.has(nodeId); suffix++) nodeId = `wb-${e.id ?? i}-${suffix}`;
+    usedNodeIds.add(nodeId);
     const rel = `world_book/${safeDirName(e.comment || nodeId, used)}.md`;
     const text = String(e.content ?? '');
     if (!bodyRoundTrips(text)) notes.push(`条目「${e.comment}」：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);

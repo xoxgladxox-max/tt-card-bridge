@@ -56,7 +56,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步 <small class="ttcb-dim">v0.3.3</small></b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.3.4</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
@@ -130,6 +130,15 @@ export function mountSettings({ client, getContext, refreshCards }) {
     const currentCard = () => {
         const ctx = getContext();
         return ctx.groupId ? null : ctx.characters?.[ctx.characterId];
+    };
+    const formatCardLabel = card => {
+        if (!card) return '';
+        const fileStem = (card.avatar ?? '').replace(/\.png$/i, '');
+        const allChars = getContext()?.characters ?? [];
+        const hasSameName = allChars.filter(c => c?.name === card.name).length > 1;
+        return (fileStem && (fileStem !== card.name || hasSameName))
+            ? `${card.name}（${card.avatar}）`
+            : card.name;
     };
     // 世界书编辑器下拉框里当前选中的那一本；没有打开任何世界书时为 null
     const currentWorldName = () => {
@@ -308,7 +317,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
             ? `工程「${cardMatched.id}」 · ${statusLabels[cardMatched.status] ?? cardMatched.status ?? '状态未知'}${errOf(cardMatched)}`
             : '还没有本地工程（第一次用点「拆解当前卡」）';
         find('current-card').textContent = card
-            ? `当前卡：${card.name} · ${detail}${followGap}`
+            ? `当前卡：${formatCardLabel(card)} · ${detail}${followGap}`
             : '先在酒馆打开一张角色卡（群聊不支持）。';
         // 当前卡这一行只有两个按钮：没拆过才显示拆解和拆前清单；「连接」作用于「工作区」里选中的工程
         const unmatched = !!card && !cardMatched;
@@ -356,7 +365,10 @@ export function mountSettings({ client, getContext, refreshCards }) {
                 noneOpt.value = '';
                 select.append(noneOpt);
                 for (const project of pool) {
-                    const option = element('option', `${project.name ?? project.cardFile ?? project.id}${project.attached ? '' : '（还没连到酒馆）'}`);
+                    const baseLabel = project.name ?? project.cardFile ?? project.id;
+                    const linkedStem = project.cardFile && !project.cardFile.startsWith('world:') ? project.cardFile.replace(/\.png$/i, '') : null;
+                    const fileHint = linkedStem && linkedStem !== baseLabel ? ` → ${project.cardFile}` : '';
+                    const option = element('option', `${baseLabel}${fileHint}${project.attached ? '' : '（还没连到酒馆）'}`);
                     option.value = project.id;
                     select.append(option);
                 }
@@ -476,10 +488,11 @@ export function mountSettings({ client, getContext, refreshCards }) {
             const card = currentCard();
             if (!card) throw new Error('先在酒馆选择一张角色卡。');
             const keep = keptExtras();
-            await attachWithConflictPrompt('attach', { cardFile: card.avatar, keep }, card.name);
+            const targetFolder = card.avatar.replace(/\.png$/i, '');
+            await attachWithConflictPrompt('attach', { cardFile: card.avatar, keep }, targetFolder);
             if (state?.paused !== false) state = await client.control('resume');
             await checkCardFollow({ force: true });
-            find('diff').replaceChildren(element('p', `已把「${card.name}」拆到工作区「${card.avatar.replace(/\.png$/i, '')}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}，已开启实时双向同步。`));
+            find('diff').replaceChildren(element('p', `已把「${formatCardLabel(card)}」拆到工作区「${targetFolder}」${keep.length ? `（${keep.length} 项留在 card.md）` : ''}，已开启实时双向同步。`));
         },
         'set-cards-root': async () => {
             if (connection?.mode === 'browser') {

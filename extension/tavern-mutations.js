@@ -13,14 +13,21 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         if (!response.ok) throw new Error(`${url} 失败：HTTP ${response.status} ${(await response.text()).slice(0, 300)}`);
         return response;
     }
-    async function readWorld(name) {
+    async function resolveWorldName(name) {
         if (!name) return null;
-        // TauriTavern returns {entries:{}} with HTTP 200 for a missing book.
-        // Existence must come from the fresh list, not from an empty payload.
         const settings = await (await request('/api/settings/get', {})).json();
         if (!Array.isArray(settings.world_names)) throw new Error('无法取得世界书列表；未将查询失败当作文件不存在。');
-        if (!settings.world_names.includes(name)) return null;
-        return (await request('/api/worldinfo/get', { name })).json();
+        const trimmed = typeof name === 'string' ? name.trim() : name;
+        if (settings.world_names.includes(name)) return name;
+        if (trimmed && settings.world_names.includes(trimmed)) return trimmed;
+        return null;
+    }
+    async function readWorld(name) {
+        // TauriTavern returns {entries:{}} with HTTP 200 for a missing book.
+        // Existence must come from the fresh list, not from an empty payload.
+        const actual = await resolveWorldName(name);
+        if (!actual) return null;
+        return (await request('/api/worldinfo/get', { name: actual })).json();
     }
     async function readCardBytes(avatar) {
         // The export endpoint rewrites metadata. Only the original asset can be
@@ -41,7 +48,8 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         const actualWorld = await worldDigest(diskWorld);
         if (actualWorld !== job.expected.world) throw new Error('世界书在预览后发生变化，已拒绝写入。请重新查看差异。');
         if (diskWorld !== null) {
-            const workingWorld = await getContext().loadWorldInfo(job.expected.worldName);
+            const actualName = (await resolveWorldName(job.expected.worldName)) ?? job.expected.worldName;
+            const workingWorld = await getContext().loadWorldInfo(actualName);
             if (await worldDigest(workingWorld) !== actualWorld) throw new Error('世界书有未保存编辑或缓存与磁盘不一致；先保存或刷新酒馆，再重新查看差异。');
         }
         if (job.expected.targetWorld) {
@@ -55,11 +63,12 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         await st.reloadWorldInfoEditor(name);
     }
     async function writeWorld(name, world) {
+        const cleanName = typeof name === 'string' ? name.trim() : name;
         // The common save path owns the working-document cache and pending writes.
-        await getContext().saveWorldInfo(name, world, true);
-        const stored = await readWorld(name);
+        await getContext().saveWorldInfo(cleanName, world, true);
+        const stored = await readWorld(cleanName);
         if (await worldDigest(stored) !== await worldDigest(world)) throw new Error('世界书写入后的核验不一致；未报告成功。');
-        return { name, after: Object.keys(stored?.entries ?? {}).length };
+        return { name: cleanName, after: Object.keys(stored?.entries ?? {}).length };
     }
     async function syncWorld(name, book) {
         const st = getContext();

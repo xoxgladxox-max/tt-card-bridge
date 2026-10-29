@@ -781,7 +781,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           __vfsFiles.set(\`/tavern/default-user/characters/\${avatar}\`, { bytes: buf, mtimeMs: Date.now() });
           try {
             const card = __mod_Slots.readCardPng(buf);
-            const w = card?.data?.extensions?.world;
+            const w = typeof card?.data?.extensions?.world === 'string' ? card.data.extensions.world.trim() : '';
             if (w) wantedWorlds.add(w);
           } catch {}
         }
@@ -790,18 +790,54 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
 
     if (service) {
       for (const p of service.projects()) {
-        if (p.cardFile?.startsWith('world:')) wantedWorlds.add(p.cardFile.slice(6));
-        if (p.binding?.worldOverride) wantedWorlds.add(p.binding.worldOverride);
+        if (p.cardFile?.startsWith('world:')) wantedWorlds.add(p.cardFile.slice(6).trim());
+        if (p.binding?.worldOverride) wantedWorlds.add(String(p.binding.worldOverride).trim());
       }
     }
 
-    for (const worldName of wantedWorlds) {
+    let existingWorlds = null;
+    if (wantedWorlds.size > 0) {
+      try {
+        const sRes = await fetchImpl('/api/settings/get', {
+          method: 'POST',
+          headers: st.getRequestHeaders(),
+          body: JSON.stringify({}),
+        });
+        if (sRes.ok) {
+          const settings = await sRes.json();
+          if (Array.isArray(settings?.world_names)) {
+            existingWorlds = new Set(settings.world_names);
+          }
+        }
+      } catch {}
+    }
+
+    if (existingWorlds) {
+      const existingTrimmed = new Set([...existingWorlds].map(x => String(x).trim()));
+      for (const k of [...__vfsFiles.keys()]) {
+        if (k.startsWith('/tavern/default-user/worlds/') && k.endsWith('.json')) {
+          const wName = k.slice('/tavern/default-user/worlds/'.length, -5);
+          if (!existingWorlds.has(wName) && !existingTrimmed.has(wName)) {
+            __vfsFiles.delete(k);
+          }
+        }
+      }
+    }
+
+    for (const rawName of wantedWorlds) {
+      const worldName = typeof rawName === 'string' ? rawName.trim() : '';
       if (!worldName) continue;
+      let queryName = worldName;
+      if (existingWorlds) {
+        if (existingWorlds.has(rawName)) queryName = rawName;
+        else if (existingWorlds.has(worldName)) queryName = worldName;
+        else continue; // 世界书在酒馆中不存在（卡片仅含内嵌 character_book），不写入空文件到 VFS
+      }
       try {
         const res = await fetchImpl('/api/worldinfo/get', {
           method: 'POST',
           headers: st.getRequestHeaders(),
-          body: JSON.stringify({ name: worldName }),
+          body: JSON.stringify({ name: queryName }),
         });
         if (res.ok) {
           const data = await res.json();

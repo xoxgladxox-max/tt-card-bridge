@@ -3,7 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { BRIDGE_ROOT } from './connection.mjs';
-import { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extrasLib } from './slots.mjs';
+import { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, tryWorldFilePath, readCardPng, extrasLib } from './slots.mjs';
 import { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } from './safety.mjs';
 import { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } from './projects.mjs';
 import { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline } from './world-entry-ids.mjs';
@@ -108,7 +108,8 @@ export class FileSyncAdapter {
   remote(project) {
     const worldOnly = project.cardFile.startsWith('world:');
     if (!worldOnly) segment(project.cardFile, '卡文件名');
-    const tavern = readSlotsFromTavern(project.cardFile, { userDir: this.userDir, requireWorld: true });
+    const hadExternalWorld = Boolean(project.dir && fs.existsSync(path.join(project.dir, '.card-forge', 'originals', 'world.json')));
+    const tavern = readSlotsFromTavern(project.cardFile, { userDir: this.userDir, requireWorld: hadExternalWorld });
     const png = tavern.png ?? null;
     const worldName = tavern.worldName || null;
     const worldRaw = tavern.worldRaw ?? null;
@@ -165,14 +166,17 @@ export class FileSyncAdapter {
     const worldOverride = project.cardFile.startsWith('world:') ? null : readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
     const fileStem = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
     const remoteName = remote.tavern.card?.data?.name ?? remote.tavern.card?.name ?? null;
-    const nameOverride = fileStem && remoteName === fileStem ? fileStem : null;
+    const cardNodeName = scan.nodes.find(n => n.type === 'card')?.frontmatter?.name ?? project.name;
+    // 仅当「新建卡」因重名自动加了后缀（如工程名与 card.md 都是 A，而酒馆文件名与卡内名都是 A 2）时才用 fileStem 对齐；
+    // 其余情况（如二次导入卡「配种法案1.png」卡内名为「配种法案」、多张同名卡、或在 card.md 手动改了角色名）一律以 card.md 的 name 为准
+    const nameOverride = fileStem && remoteName === fileStem && cardNodeName === project.name && fileStem !== cardNodeName ? fileStem : null;
     const built = this.assembleCard(scan, build, worldOverride, nameOverride);
     const nodes = attachNodeSettings(readSlotsFromNodes(scan, fp, lib), built.card, scan);
     for (const [key, slot] of Object.entries(nodes.slots)) if (key.startsWith('entry:') && isWorldEntryPath(slot.relPath)) slot.newEntryEligible = true;
     const targetWorld = built.card.data?.extensions?.world || null;
     if (targetWorld && targetWorld !== remote.worldName) {
-      const target = worldFilePath(targetWorld, this.userDir);
-      remote.expected.targetWorld = { name: targetWorld, hash: fs.existsSync(target) ? hashObject(readJson(target)) : null };
+      const target = tryWorldFilePath(targetWorld, this.userDir)?.filePath ?? null;
+      remote.expected.targetWorld = { name: targetWorld, hash: target && fs.existsSync(target) ? hashObject(readJson(target)) : null };
     }
     const { open, resolved } = pendingStatus(project.dir, baseline, remote.tavern.slots);
     const issues = [];
@@ -406,7 +410,7 @@ export class FileSyncAdapter {
       card = info(file);
       try { worldName = readCardPng(file)?.data?.extensions?.world || null; } catch { worldName = null; }
     }
-    const world = worldName ? info(worldFilePath(worldName, this.userDir)) : null;
+    const world = worldName ? info(tryWorldFilePath(worldName, this.userDir)?.filePath ?? '') : null;
     return hashObject({ local, bridge, card, worldName, world });
   }
   // 只按参与同步的文件计算：根目录放笔记、草稿、调研不会触发同步检查

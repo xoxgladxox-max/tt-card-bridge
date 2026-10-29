@@ -77,10 +77,11 @@ export function entryFromNode(n, displayIndex, order) {
 // tavern 段：从酒馆旧卡拆出来、节点协议没有对应字段的设置（如 scan_depth、probability、enabled），原样盖在装配结果上。
 // 只盖设置，不盖正文：content 与单槽文字字段始终以 <!-- body --> 为准。
 const BODY_ONLY = new Set(['content', 'description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions', 'alternate_greetings', 'character_book']);
-function applyOverride(obj, ov) {
+const BOOK_BODY_ONLY = new Set(['entries']);
+function applyOverride(obj, ov, skipKeys = BODY_ONLY) {
   if (!ov || typeof ov !== 'object') return obj;
   for (const [k, v] of Object.entries(ov)) {
-    if (BODY_ONLY.has(k)) continue;
+    if (skipKeys.has(k)) continue;
     if (k === 'extensions' && v && typeof v === 'object' && !Array.isArray(v)) obj.extensions = { ...(obj.extensions ?? {}), ...v };
     else obj[k] = v;
   }
@@ -132,7 +133,7 @@ export function assemble(scan, opts = {}) {
   let bodyMeta = null;
   if (card?.body?.trim()) {
     try {
-      const parsed = YAML.parse(card.body);
+      const parsed = YAML.parse(card.body, { logLevel: 'error' });
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) bodyMeta = parsed;
     } catch { /* body 不是 YAML 时忽略 */ }
   }
@@ -148,7 +149,7 @@ export function assemble(scan, opts = {}) {
       name: bookName,
       entries: bookSorted.map((n, i) => entryWithOverride(n, i, orders.get(n))),
     };
-    applyOverride(data.character_book, card?.frontmatter?.tavern?.book);
+    applyOverride(data.character_book, card?.frontmatter?.tavern?.book, BOOK_BODY_ONLY);
   } else if (card?.frontmatter?.tavern?.data && Object.hasOwn(card.frontmatter.tavern.data, 'character_book') && card.frontmatter.tavern.data.character_book === null) {
     data.character_book = null;
   }
