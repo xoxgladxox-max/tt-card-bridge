@@ -131,9 +131,10 @@ export function assemble(scan, opts = {}) {
   };
   // 支持 card.md 写在 frontmatter 顶层或 <!-- body --> YAML 里的扩展与世界书名（world / world_book_name / extensions.world / tavern.data.extensions.world）
   let bodyMeta = null;
-  if (card?.body?.trim()) {
+  const rawBody = card?.body?.trim() ?? '';
+  if (rawBody && /^(world|world_book_name|extensions|tavern|character_version)\s*:/m.test(rawBody)) {
     try {
-      const parsed = YAML.parse(card.body, { logLevel: 'error' });
+      const parsed = YAML.parse(rawBody, { logLevel: 'silent', uniqueKeys: false });
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) bodyMeta = parsed;
     } catch { /* body 不是 YAML 时忽略 */ }
   }

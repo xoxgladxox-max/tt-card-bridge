@@ -104,7 +104,7 @@ export function parseNodeFile(raw, relPath) {
     return { frontmatter, body, problems, status: null, confirm: null, loose: true };
   } else {
     try {
-      frontmatter = YAML.parse(quoteBarePosition(fmMatch[1]), { logLevel: 'error' }) ?? {};
+      frontmatter = YAML.parse(quoteBarePosition(fmMatch[1]), { logLevel: 'silent', uniqueKeys: false }) ?? {};
       if (typeof frontmatter !== 'object' || Array.isArray(frontmatter)) {
         problems.push({ rule: 'P0', message: 'frontmatter 不是键值表' });
         frontmatter = {};

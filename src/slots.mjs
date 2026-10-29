@@ -23,7 +23,7 @@ export const stableJson = v => JSON.stringify(sortKeys(v), null, 2);
 // 可拆项槽位：regex:<id>、script:<id>、vars、xbtasks，值是整项 JSON
 export function extraSlots(card) {
   const slots = {};
-  for (const item of extrasLib.listExtras(card)) slots[item.key] = { value: stableJson(item.value), label: `${{ regex: '正则', script: '脚本', vars: '', xbtasks: '' }[item.kind]}${item.kind === 'vars' || item.kind === 'xbtasks' ? '' : '：'}${item.label}`, extraKind: item.kind };
+  for (const item of extrasLib.listExtras(card)) slots[item.key] = { value: stableJson(item.value), label: `${{ regex: '正则', script: '脚本', vars: '', xbtasks: '' }[item.kind]}${item.kind === 'vars' || item.kind === 'xbtasks' ? '' : '：'}${item.label}`, extraKind: item.kind, extraIndex: item.index };
   return slots;
 }
 export const extraOrder = card => extrasLib.listExtras(card).map(i => i.key);
@@ -70,10 +70,11 @@ export function attachNodeSettings(nodeSlots, assembledCard, scan = null) {
   }
   const ex = scan?.extras ?? { regex: [], scripts: [], vars: null, xbtasks: null };
   const fileOf = new Map([...ex.regex, ...ex.scripts].map(f => [f.key, f]));
+  const fileByPos = new Map([...ex.regex, ...ex.scripts].map(f => [`${f.kind}:${f.n}`, f]));
   if (ex.vars) fileOf.set('vars', { ...ex.vars, base: null });
   if (ex.xbtasks) fileOf.set('xbtasks', { ...ex.xbtasks, base: null });
   for (const [key, slot] of Object.entries(extraSlots(assembledCard))) {
-    const f = fileOf.get(key);
+    const f = (slot.extraIndex !== undefined ? fileByPos.get(`${slot.extraKind}:${slot.extraIndex + 1}`) : null) ?? fileOf.get(key);
     nodeSlots.slots[key] = f ? { ...slot, relPath: f.files[0], files: f.files, base: f.base } : { ...slot, relPath: 'card.md', kept: true };
   }
   return nodeSlots;

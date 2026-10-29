@@ -23,22 +23,56 @@ export const itemLabel = (kind, v, i = 0) => kind === 'regex' ? String(v?.script
   : kind === 'script' ? String(v?.name || `脚本 ${i + 1}`) : kind === 'vars' ? '角色变量' : '小白X 任务';
 
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+const isThTuple = v => Array.isArray(v) && v.every(it => Array.isArray(it) && typeof it[0] === 'string');
 const varsPresent = v => isObj(v) && Object.keys(v).length > 0;
 const xbPresent = v => isObj(v) && (Array.isArray(v.tasks) ? v.tasks.length > 0 : Object.keys(v).length > 0);
+const xbTemplatePresent = v => isObj(v) && (v.enabled === true || Boolean(v.template));
+const lwbPresent = v => isObj(v) && Object.keys(v).length > 0;
+
+// 统一读取酒馆助手的 3 种存储形态：
+// 1) object: extensions.tavern_helper = { scripts: [...], variables: {...} }
+// 2) tuple:  extensions.tavern_helper = [ ["scripts", [...]], ["variables", {...}] ]
+// 3) legacy: extensions.TavernHelper_scripts = [...]（当 tavern_helper 不存在时）
+function readThView(x) {
+  if (isObj(x?.tavern_helper)) {
+    return { mode: 'object', scripts: Array.isArray(x.tavern_helper.scripts) ? x.tavern_helper.scripts : null, variables: x.tavern_helper.variables };
+  }
+  if (isThTuple(x?.tavern_helper)) {
+    const map = new Map(x.tavern_helper.map(([k, v]) => [k, v]));
+    return { mode: 'tuple', scripts: Array.isArray(map.get('scripts')) ? map.get('scripts') : null, variables: map.get('variables') };
+  }
+  if (Array.isArray(x?.TavernHelper_scripts)) {
+    return { mode: 'legacy', scripts: x.TavernHelper_scripts, variables: null };
+  }
+  return { mode: 'none', scripts: null, variables: null };
+}
+
+function nextUniqueKey(base, seen) {
+  const count = (seen.get(base) ?? 0) + 1;
+  seen.set(base, count);
+  return count === 1 ? base : `${base}#${count}`;
+}
 
 // 卡里有哪些可以拆的项。空的角色变量、空的小白X任务不算（留在 card.md）
 export function listExtras(card) {
   const x = (card?.data ?? card)?.extensions ?? {};
   const items = [];
-  (Array.isArray(x.regex_scripts) ? x.regex_scripts : []).forEach((v, i) => items.push({ key: itemKey('regex', v), kind: 'regex', index: i, label: itemLabel('regex', v, i), disabled: v?.disabled === true, value: v }));
-  const th = isObj(x.tavern_helper) ? x.tavern_helper : null;
-  (Array.isArray(th?.scripts) ? th.scripts : []).forEach((v, i) => items.push({ key: itemKey('script', v), kind: 'script', index: i, label: itemLabel('script', v, i), disabled: v?.enabled === false, value: v }));
-  if (varsPresent(th?.variables)) items.push({ key: 'vars', kind: 'vars', index: 0, label: '角色变量', disabled: false, value: th.variables });
+  const seen = new Map();
+  (Array.isArray(x.regex_scripts) ? x.regex_scripts : []).forEach((v, i) => {
+    const key = nextUniqueKey(itemKey('regex', v), seen);
+    items.push({ key, kind: 'regex', index: i, label: itemLabel('regex', v, i), disabled: v?.disabled === true, value: v });
+  });
+  const th = readThView(x);
+  (th.scripts ?? []).forEach((v, i) => {
+    const key = nextUniqueKey(itemKey('script', v), seen);
+    items.push({ key, kind: 'script', index: i, label: itemLabel('script', v, i), disabled: v?.enabled === false, value: v });
+  });
+  if (varsPresent(th.variables)) items.push({ key: 'vars', kind: 'vars', index: 0, label: '角色变量', disabled: false, value: th.variables });
   if (xbPresent(x['xiaobaix-tasks'])) items.push({ key: 'xbtasks', kind: 'xbtasks', index: 0, label: '小白X 任务', disabled: false, value: x['xiaobaix-tasks'] });
   return items;
 }
-// 默认全拆；已停用的正则默认留在卡里
-export const defaultKeep = card => listExtras(card).filter(i => i.kind === 'regex' && i.disabled).map(i => i.key);
+// 默认全拆（前端卡的手机版状态栏、离线版美化等常以 disabled: true 存放在卡内供切换，若留在 card.md 会把数百 KB 的 HTML 塞进 YAML）
+export const defaultKeep = () => [];
 
 // 只留下 keep 里的可拆项；其余可拆项不属于卡设置比较，单独按槽位比
 export function stripExtras(data, keep = new Set()) {
@@ -51,8 +85,9 @@ export function stripExtras(data, keep = new Set()) {
 export function keptExtensions(ext, keep) {
   if (!isObj(ext)) return ext;
   const x = structuredClone(ext);
+  const seen = new Map();
   const filterList = (list, kind) => {
-    const left = list.filter(v => keep.has(itemKey(kind, v)));
+    const left = list.filter(v => keep.has(nextUniqueKey(itemKey(kind, v), seen)));
     return { left, removed: left.length < list.length };
   };
   if (Array.isArray(x.regex_scripts)) {
@@ -68,6 +103,16 @@ export function keptExtensions(ext, keep) {
     }
     if (varsPresent(th.variables) && !keep.has('vars')) { delete th.variables; removedAny = true; }
     if (removedAny && !Object.keys(th).length) delete x.tavern_helper;
+  } else if (isThTuple(x.tavern_helper)) {
+    // 保留 tuple 数组骨架（如 [["scripts", []], ["variables", {}]]），以便 applyExtras 装回时还原成相同的 tuple 数组形态
+    x.tavern_helper = x.tavern_helper.map(([k, v]) => {
+      if (k === 'scripts' && Array.isArray(v)) return [k, filterList(v, 'script').left];
+      if (k === 'variables' && varsPresent(v) && !keep.has('vars')) return [k, {}];
+      return [k, v];
+    });
+  } else if (Array.isArray(x.TavernHelper_scripts)) {
+    // 保留旧版 TavernHelper_scripts 空数组骨架，以便 applyExtras 装回时还原到 TavernHelper_scripts
+    x.TavernHelper_scripts = filterList(x.TavernHelper_scripts, 'script').left;
   }
   if (xbPresent(x['xiaobaix-tasks']) && !keep.has('xbtasks')) delete x['xiaobaix-tasks'];
   return x;
@@ -77,12 +122,13 @@ const safeName = s => String(s || '未命名').replace(/[\\/:*?"<>|\r\n\t]/g, '_
 export const extraBase = (kind, n, label, width = 2) => `${KIND_DIR[kind]}/${String(n).padStart(width, '0')}-${safeName(label)}`;
 
 // 一项 → { 相对路径: 文件内容 }。base 是不带扩展名的路径（正则、脚本才用）
+// 纯剔除型正则（replaceString === ""，如「对AI隐藏变量更新」）只在 .json 保留 replaceString: ""，不生成 0 字节的空 .html 文件
 export function extraFiles(kind, value, base) {
   const json = v => JSON.stringify(v, null, 2) + '\n';
   if (kind === 'vars') return { [VARS_FILE]: json(value) };
   if (kind === 'xbtasks') return { [XB_FILE]: json(value) };
   const side = SIDE[kind];
-  if (isObj(value) && typeof value[side.key] === 'string') {
+  if (isObj(value) && typeof value[side.key] === 'string' && (kind !== 'regex' || value[side.key].length > 0)) {
     const { [side.key]: text, ...rest } = value;
     return { [`${base}.json`]: json(rest), [`${base}${side.ext}`]: text };
   }
@@ -113,12 +159,14 @@ export async function readExtras(root) {
       const g = groups.get(base) ?? {};
       g[ext] = rel; groups.set(base, g);
     }
+    const seen = new Map();
     for (const [base, g] of groups) {
       if (!g['.json']) throw new Error(`${g[side.ext]}：缺少同名的 .json 设置文件`);
       const value = await readJsonFile(root, g['.json']);
       if (g[side.ext] && isObj(value)) value[side.key] = noBom(await fs.readFile(path.join(root, g[side.ext]), 'utf8'));
       const m = path.posix.basename(base).match(/^(\d+)-/);
-      out[kind === 'regex' ? 'regex' : 'scripts'].push({ kind, n: m ? Number(m[1]) : Infinity, base, files: [g['.json'], g[side.ext]].filter(Boolean), value, key: itemKey(kind, value) });
+      const key = nextUniqueKey(itemKey(kind, value), seen);
+      out[kind === 'regex' ? 'regex' : 'scripts'].push({ kind, n: m ? Number(m[1]) : Infinity, base, files: [g['.json'], g[side.ext]].filter(Boolean), value, key });
     }
   }
   if (await exists(path.join(root, VARS_FILE))) out.vars = { files: [VARS_FILE], value: await readJsonFile(root, VARS_FILE) };
@@ -146,9 +194,26 @@ export function applyExtras(data, extras) {
   const x = data.extensions = { ...(data.extensions ?? {}) };
   if (extras.regex.length) x.regex_scripts = mergeOrdered(extras.regex, Array.isArray(x.regex_scripts) ? x.regex_scripts : []);
   if (extras.scripts.length || extras.vars) {
-    const th = x.tavern_helper = { ...(isObj(x.tavern_helper) ? x.tavern_helper : {}) };
-    if (extras.scripts.length) th.scripts = mergeOrdered(extras.scripts, Array.isArray(th.scripts) ? th.scripts : []);
-    if (extras.vars) th.variables = extras.vars.value;
+    if (isThTuple(x.tavern_helper)) {
+      const tuple = x.tavern_helper.map(([k, v]) => [k, v]);
+      const idxS = tuple.findIndex(([k]) => k === 'scripts');
+      if (extras.scripts.length) {
+        const keptS = idxS >= 0 && Array.isArray(tuple[idxS][1]) ? tuple[idxS][1] : [];
+        const merged = mergeOrdered(extras.scripts, keptS);
+        if (idxS >= 0) tuple[idxS] = ['scripts', merged]; else tuple.push(['scripts', merged]);
+      }
+      if (extras.vars) {
+        const idxV = tuple.findIndex(([k]) => k === 'variables');
+        if (idxV >= 0) tuple[idxV] = ['variables', extras.vars.value]; else tuple.push(['variables', extras.vars.value]);
+      }
+      x.tavern_helper = tuple;
+    } else if (x.tavern_helper === undefined && Array.isArray(x.TavernHelper_scripts) && !extras.vars) {
+      x.TavernHelper_scripts = mergeOrdered(extras.scripts, x.TavernHelper_scripts);
+    } else {
+      const th = x.tavern_helper = { ...(isObj(x.tavern_helper) ? x.tavern_helper : {}) };
+      if (extras.scripts.length) th.scripts = mergeOrdered(extras.scripts, Array.isArray(th.scripts) ? th.scripts : []);
+      if (extras.vars) th.variables = extras.vars.value;
+    }
   }
   if (extras.xbtasks) x['xiaobaix-tasks'] = extras.xbtasks.value;
   return data;
@@ -172,7 +237,8 @@ export function setKeptItem(ext, key, value) {
 // 变量框架识别（可以同时命中多个）。只看卡里的内容，不联网；extraText 是卡绑定的外置世界书原文
 export function detectFrameworks(card, extraText = '') {
   const d = card?.data ?? card ?? {}, x = d.extensions ?? {};
-  const scripts = JSON.stringify(x.tavern_helper?.scripts ?? []);
+  const th = readThView(x);
+  const scripts = JSON.stringify(th.scripts ?? []);
   const book = JSON.stringify(d.character_book?.entries ?? []) + '\n' + extraText;
   const all = [scripts, book, JSON.stringify(x.regex_scripts ?? []), d.first_mes, ...(d.alternate_greetings ?? []), d.description, d.post_history_instructions].join('\n');
   const out = [];
@@ -180,10 +246,10 @@ export function detectFrameworks(card, extraText = '') {
     const ver = /MagVarUpdate@beta/i.test(scripts) ? 'beta' : /MagVarUpdate/i.test(scripts) ? 'master' : '未见加载脚本';
     out.push({ id: 'mvu', label: `MVU（${ver}）`, hint: '只需要装酒馆助手；MVU 本体由卡里的脚本从 jsdelivr 加载' });
   }
-  if (/<state>|xbgetvar|<varevent>/i.test(all) || xbPresent(x['xiaobaix-tasks'])) {
+  if (/<state>|xbgetvar|<varevent>|<<taskjs>>/i.test(all) || xbPresent(x['xiaobaix-tasks']) || xbTemplatePresent(x['xiaobaix-template']) || lwbPresent(x.LittleWhiteBox)) {
     out.push({ id: 'xiaobaix', label: '小白X', hint: '需要小白X 3.0 以上，并在小白X 设置里把变量模式切到 2.0 (state)' });
   }
-  if (!out.length && (x.tavern_helper?.scripts ?? []).length) out.push({ id: 'tavern_helper', label: '仅酒馆助手', hint: '需要装酒馆助手' });
+  if (!out.length && (th.scripts ?? []).length) out.push({ id: 'tavern_helper', label: '仅酒馆助手', hint: '需要装酒馆助手' });
   if (!out.length) out.push({ id: 'none', label: '没有变量框架', hint: '' });
   return out;
 }

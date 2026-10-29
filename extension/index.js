@@ -1,9 +1,9 @@
 // One authenticated loopback connection serves the settings panel and queued tasks.
 // 带上版本号查询参数，避免在酒馆点「更新扩展」后浏览器继续使用旧版子模块缓存
-import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.3';
-import { mountSettings } from './settings.js?v=0.3.3';
-import { createTavernMutations } from './tavern-mutations.js?v=0.3.3';
-import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.3';
+import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.5';
+import { mountSettings } from './settings.js?v=0.3.5';
+import { createTavernMutations } from './tavern-mutations.js?v=0.3.5';
+import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.5';
 
 const TAG = '[tt-card-bridge]';
 let known = null;
@@ -40,15 +40,24 @@ async function syncActiveCardRuntime(cid) {
   const latest = ctx();
   const card = latest?.characters?.[cid];
   if (!card) return;
-  const th = card.data?.extensions?.tavern_helper;
+  const ext = card.data?.extensions ?? {};
+  const th = ext.tavern_helper;
   const helper = window.TavernHelper;
   if (helper && th && typeof th === 'object') {
-    if (Array.isArray(th.scripts) && typeof helper.replaceScriptTrees === 'function') {
-      try { await helper.replaceScriptTrees(th.scripts, { type: 'character' }); } catch (e) { console.warn(TAG, e); }
+    const scripts = Array.isArray(th)
+      ? th.find(x => Array.isArray(x) && x[0] === 'scripts')?.[1]
+      : th.scripts;
+    const variables = Array.isArray(th)
+      ? th.find(x => Array.isArray(x) && x[0] === 'variables')?.[1]
+      : th.variables;
+    if (Array.isArray(scripts) && typeof helper.replaceScriptTrees === 'function') {
+      try { await helper.replaceScriptTrees(scripts, { type: 'character' }); } catch (e) { console.warn(TAG, e); }
     }
-    if (th.variables && typeof th.variables === 'object' && typeof helper.replaceVariables === 'function') {
-      try { await helper.replaceVariables(th.variables, { type: 'character' }); } catch (e) { console.warn(TAG, e); }
+    if (variables && typeof variables === 'object' && typeof helper.replaceVariables === 'function') {
+      try { await helper.replaceVariables(variables, { type: 'character' }); } catch (e) { console.warn(TAG, e); }
     }
+  } else if (helper && Array.isArray(ext.TavernHelper_scripts) && typeof helper.replaceScriptTrees === 'function') {
+    try { await helper.replaceScriptTrees(ext.TavernHelper_scripts, { type: 'character' }); } catch (e) { console.warn(TAG, e); }
   }
   const first = latest.chat?.[0];
   if (Array.isArray(latest.chat) && latest.chat.length === 1 && first && !first.is_user && !first.is_system

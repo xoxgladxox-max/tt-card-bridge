@@ -735,7 +735,10 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
   }
 
-  async function syncTavernToVfs(extraCards = [], extraWorlds = []) {
+  const cardWorldCache = new Map();
+  let lastPolledAvatar = null;
+
+  async function syncTavernToVfs(extraCards = [], extraWorlds = [], { force = false } = {}) {
     const st = getContext?.();
     if (!st) return;
     __vfsEnsureDir('/tavern/default-user/characters', false);
@@ -745,8 +748,11 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     const currentAvatar = st.characterId !== undefined && st.characterId !== null && st.characterId !== ''
       ? characters[Number(st.characterId)]?.avatar
       : null;
+    const avatarSwitched = currentAvatar !== lastPolledAvatar;
+    lastPolledAvatar = currentAvatar;
+    const shouldForce = force || avatarSwitched;
 
-    // 同步酒馆中所有角色卡的文件存在性；对当前打开的卡与目标卡拉取真实 PNG 字节
+    // 同步酒馆中所有角色卡的文件存在性；对当前打开的卡与目标卡按需拉取真实 PNG 字节
     const activeAvatars = new Set([currentAvatar, ...extraCards].filter(Boolean));
     if (service) {
       for (const p of service.projects()) {
@@ -757,7 +763,10 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     for (const k of [...__vfsFiles.keys()]) {
       if (k.startsWith('/tavern/default-user/characters/')) {
         const name = k.slice('/tavern/default-user/characters/'.length);
-        if (!existingSet.has(name)) __vfsFiles.delete(k);
+        if (!existingSet.has(name)) {
+          __vfsFiles.delete(k);
+          cardWorldCache.delete(name);
+        }
       }
     }
     for (const c of characters) {
@@ -774,14 +783,22 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
 
     for (const avatar of activeAvatars) {
       if (!existingSet.has(avatar)) continue;
+      const vfsPath = \`/tavern/default-user/characters/\${avatar}\`;
+      const cached = __vfsFiles.get(vfsPath);
+      if (!shouldForce && cached && cached.bytes.length > 0 && !extraCards.includes(avatar)) {
+        const cachedWorld = cardWorldCache.get(avatar);
+        if (cachedWorld) wantedWorlds.add(cachedWorld);
+        continue;
+      }
       try {
         const res = await fetchImpl(\`/characters/\${encodeURIComponent(avatar)}\`, { cache: 'no-store' });
         if (res.ok) {
           const buf = new BrowserBuffer(await res.arrayBuffer());
-          __vfsFiles.set(\`/tavern/default-user/characters/\${avatar}\`, { bytes: buf, mtimeMs: Date.now() });
+          __vfsFiles.set(vfsPath, { bytes: buf, mtimeMs: Date.now() });
           try {
             const card = __mod_Slots.readCardPng(buf);
             const w = typeof card?.data?.extensions?.world === 'string' ? card.data.extensions.world.trim() : '';
+            cardWorldCache.set(avatar, w);
             if (w) wantedWorlds.add(w);
           } catch {}
         }
@@ -794,6 +811,12 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         if (p.binding?.worldOverride) wantedWorlds.add(String(p.binding.worldOverride).trim());
       }
     }
+
+    const worldsNeedFetch = [...wantedWorlds].some(rawName => {
+      const wName = typeof rawName === 'string' ? rawName.trim() : '';
+      return wName && (shouldForce || extraWorlds.includes(rawName) || !__vfsFiles.has(\`/tavern/default-user/worlds/\${wName}.json\`));
+    });
+    if (!worldsNeedFetch) return;
 
     let existingWorlds = null;
     if (wantedWorlds.size > 0) {
@@ -833,6 +856,9 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         else if (existingWorlds.has(worldName)) queryName = worldName;
         else continue; // 世界书在酒馆中不存在（卡片仅含内嵌 character_book），不写入空文件到 VFS
       }
+      if (!shouldForce && !extraWorlds.includes(rawName) && __vfsFiles.has(\`/tavern/default-user/worlds/\${worldName}.json\`)) {
+        continue;
+      }
       try {
         const res = await fetchImpl('/api/worldinfo/get', {
           method: 'POST',
@@ -857,7 +883,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       else if (job.op === 'rename') report = await runRenameJob(job);
       else if (job.worldName && !job.card) report = await mutations.runWorld(job);
       else report = await mutations.runCard(job);
-      await syncTavernToVfs([job.avatar, report?.avatar].filter(Boolean), [job.worldName, job.card?.data?.extensions?.world].filter(Boolean));
+      await syncTavernToVfs([job.avatar, report?.avatar].filter(Boolean), [job.worldName, job.card?.data?.extensions?.world].filter(Boolean), { force: true });
       return report;
     };
     adapter = new __mod_adapter.FileSyncAdapter({
@@ -908,7 +934,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       if (perm !== 'granted') throw new Error('未授予本地文件夹读写权限，同步未开启。');
     }
     await pullDiskToVfs();
-    await syncTavernToVfs();
+    await syncTavernToVfs([], [], { force: true });
     const svc = await ensureService();
     svc.state.paused = false;
     svc.saveState();
@@ -935,7 +961,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         throw err;
       }
       const changed = await pullDiskToVfs();
-      await syncTavernToVfs();
+      await syncTavernToVfs([], [], { force: changed });
       const svc = await ensureService();
       const st = getContext?.();
       const currentAvatar = st?.characterId !== undefined && st?.characterId !== null && st?.characterId !== ''
@@ -961,7 +987,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       await pullDiskToVfs();
       const extraCards = [args.cardFile].filter(Boolean);
       const extraWorlds = [args.worldName].filter(Boolean);
-      await syncTavernToVfs(extraCards, extraWorlds);
+      await syncTavernToVfs(extraCards, extraWorlds, { force: true });
       const svc = await ensureService();
       const res = await svc.control({ ...args, action });
       await flushVfsToDisk();

@@ -575,4 +575,41 @@ test('handles duplicate-named cards, missing bound worldbook fallback, trailing-
   assert.equal(p2.id, 'A2');
   assert.equal((await f.service.control({ action: 'check', projectId: 'A2' })).results[0].diff.clean, true);
 });
+test('frontend cards: supports tuple/legacy tavern_helper, duplicate regex UUIDs, disabled HUD regexes, and strip-only regexes', async t => {
+  const f = await fileFixture(t, true);
+  const feCard = structuredClone(readCardPng(f.pngPath));
+  feCard.data.name = 'FrontendCard';
+  feCard.data.extensions = {
+    world: 'Book',
+    regex_scripts: [
+      { id: 'dup-id', scriptName: '对AI隐藏变量更新', findRegex: '/<UpdateVariable>[\\s\\S]*?<\\/UpdateVariable>/g', replaceString: '', disabled: false },
+      { id: 'dup-id', scriptName: '状态栏-手机版', findRegex: '/<status>/g', replaceString: '<div>Mobile HUD</div>', disabled: true },
+      { id: 'pc-id', scriptName: '状态栏-PC版', findRegex: '/<status>/g', replaceString: '<div>PC HUD</div>', disabled: false },
+    ],
+    tavern_helper: [
+      ['scripts', [{ id: 's1', name: 'MVU_ZOD', content: 'console.log("zod");', enabled: true }]],
+      ['variables', { stat_data: { hp: 100 } }],
+    ],
+  };
+  fs.writeFileSync(path.join(f.userDir, 'characters', 'FE.png'), embedChara(basePng, feCard));
+  const p = await f.service.control({ action: 'attach', cardFile: 'FE.png' });
+  const pDir = path.join(f.cardsRoot, p.id);
+  const regexFiles = fs.readdirSync(path.join(pDir, 'regex')).sort();
+  const scriptFiles = fs.readdirSync(path.join(pDir, 'scripts')).sort();
+  // 纯剔除型正则（replaceString === ""）只生成 .json 不生成 0 字节 .html；disabled: true 的手机版状态栏同样拆到 regex/ 下
+  assert.deepEqual(regexFiles, [
+    '01-对AI隐藏变量更新.json',
+    '02-状态栏-手机版.html',
+    '02-状态栏-手机版.json',
+    '03-状态栏-PC版.html',
+    '03-状态栏-PC版.json',
+  ]);
+  assert.deepEqual(scriptFiles, [
+    '01-MVU_ZOD.js',
+    '01-MVU_ZOD.json',
+    'variables.json',
+  ]);
+  assert.equal((await f.service.control({ action: 'check', projectId: 'FE' })).results[0].diff.clean, true);
+});
+
 
