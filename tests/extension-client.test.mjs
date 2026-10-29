@@ -326,3 +326,18 @@ test('installer ships the complete module tree and backs up replaced and removed
     assert.equal(fs.existsSync(extension), false);
     assert.equal(fs.readdirSync(backupRoot).length, 2);
 });
+
+test('install --check is strictly read-only and reports environment and missing components', t => {
+    const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'tt-bridge-check-test-'));
+    t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+    const userDir = path.join(temp, 'data', 'default-user');
+    fs.mkdirSync(userDir, { recursive: true });
+    const extension = path.join(userDir, 'extensions', 'tt-card-bridge');
+    const env = { ...process.env, TAVERN_USER_DIR: userDir, TT_BRIDGE_TOKEN: TOKEN, TT_BRIDGE_PORT: '18789', TT_BRIDGE_CARDS_ROOT: path.join(temp, 'cards') };
+    const out = execFileSync(process.execPath, ['bin/tt-card.mjs', 'install', '--check'], { cwd: ROOT, env, encoding: 'utf8' });
+    assert.match(out, /环境与组件识别报告/);
+    assert.match(out, /普通酒馆（原生 SillyTavern）/);
+    assert.match(out, /酒馆扩展未安装/);
+    assert.equal(fs.existsSync(extension), false);
+});
+

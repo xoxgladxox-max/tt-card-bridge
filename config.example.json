@@ -1,4 +1,3 @@
 {
-  "skillsRoot": "../card-forge-lab",
-  "cardsRoot": "../cards"
+  "cardsRoot": "./cards"
 }

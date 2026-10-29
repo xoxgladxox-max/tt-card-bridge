@@ -32,7 +32,7 @@ function settingDifferences(node, remote, prefix = '') {
   return out;
 }
 export class FileSyncAdapter {
-  constructor({ skillsRoot, userDir, cardsRoot = null, transport = publishCardJob, queryResult = getJobResult }) { this.skillsRoot = skillsRoot ? path.resolve(BRIDGE_ROOT, skillsRoot) : path.resolve(BRIDGE_ROOT, '../card-forge-lab'); this.userDir = userDir; this.cardsRoot = cardsRoot; this.transport = transport; this.queryResult = queryResult; }
+  constructor({ skillsRoot = null, userDir, cardsRoot = null, transport = publishCardJob, queryResult = getJobResult } = {}) { this.skillsRoot = skillsRoot ? path.resolve(BRIDGE_ROOT, skillsRoot) : null; this.userDir = userDir; this.cardsRoot = cardsRoot; this.transport = transport; this.queryResult = queryResult; }
   operationFile(project) { return contained(project.dir, '.card-forge/operation.json'); }
   localSnapshot(project) {
     const rawFiles = Object.fromEntries(nodeFiles(project.dir).map(rel => [rel, fs.readFileSync(contained(project.dir, rel), 'utf8')]));
@@ -99,8 +99,9 @@ export class FileSyncAdapter {
   }
   async libraries() {
     if (!this.libs) {
-      const load = rel => import(pathToFileURL(path.join(this.skillsRoot, rel)).href);
-      this.libs = Promise.all([load('src/lib/nodes.mjs'), load('src/lib/fingerprint.mjs'), load('src/cmd/build.mjs'), load('src/lib/protocol.mjs'), load('src/cmd/unpack.mjs'), load('node_modules/yaml/dist/index.js'), load('src/lib/png.mjs')]).then(([nodes, fp, build, protocol, unpack, y, png]) => ({ nodes, fp, build, protocol, unpack, YAML: y.default ?? y, png }));
+      const forgeRoot = path.join(BRIDGE_ROOT, 'src', 'forge');
+      const load = rel => import(pathToFileURL(path.join(forgeRoot, rel)).href);
+      this.libs = Promise.all([load('lib/nodes.mjs'), load('lib/fingerprint.mjs'), load('cmd/build.mjs'), load('lib/protocol.mjs'), load('cmd/unpack.mjs'), import('yaml'), load('lib/png.mjs')]).then(([nodes, fp, build, protocol, unpack, y, png]) => ({ nodes, fp, build, protocol, unpack, YAML: y.default ?? y, png }));
     }
     return this.libs;
   }

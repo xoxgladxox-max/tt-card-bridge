@@ -71,6 +71,9 @@ function readJsonValue(req, maxBytes) {
     });
   });
 }
+let lastClientSeenAt = 0;
+export const getLastClientSeenAt = () => lastClientSeenAt;
+
 export function createBridgeServer({ token, origins = allowedOrigins(), service = null, queue = new JobQueue(), maxBodyBytes = 16 * 1024 * 1024 } = {}) {
   if (!token) fail('INVALID_TOKEN', '服务必须启用鉴权', 500);
   let version = Date.now(), files = [], mcp = null;
@@ -87,6 +90,9 @@ export function createBridgeServer({ token, origins = allowedOrigins(), service 
       if (!authorized(req.headers.authorization, token)) fail('UNAUTHORIZED', '需要连接令牌', 401);
       const url = new URL(req.url, BRIDGE_BASE);
       const endpoint = url.pathname;
+      if (endpoint === '/tt-bridge/version' || endpoint === '/tt-bridge/status' || endpoint === '/tt-bridge/control') {
+        lastClientSeenAt = Date.now();
+      }
       if (req.method === 'GET' && endpoint === '/tt-bridge/version') {
         const active = queue.active;
         return send(200, { version, files, cardJob: active?.kind === 'card' ? active.job : null, skillJob: active?.kind === 'skills' ? active.job : null, queueDepth: queue.jobs.length, jobClaim: active?.consumerId ? { id: active.job.id, consumerId: active.consumerId } : null });

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { BRIDGE_ROOT, bridgeRequest } from './connection.mjs';
-import { tavernUserDir } from './paths.mjs';
+import { tavernUserDir, resolveCardsRoot, resolveSkillsRoot } from './paths.mjs';
 import { FileSyncAdapter } from './file-sync-adapter.mjs';
 import { SyncEngine } from './sync-engine.mjs';
 import { startBridge, stopBridge } from './bridge.mjs';
@@ -13,9 +13,8 @@ export async function runSyncCli(direction, args = process.argv.slice(2)) {
   const [dirArg, targetArg] = args.filter(a => !a.startsWith('--'));
   const dry = args.includes('--dry-run'), watch = args.includes('--watch'), force = args.includes('--force'), book = args.includes('--book');
   if (!dirArg || (!targetArg && !book)) fail('USAGE', `tt-card ${direction} <节点工程> <卡.png> [--dry-run] [--watch] [--force]\n独立世界书：tt-card ${direction} <节点工程> --book [世界书名]`, 400);
-  const config = JSON.parse(fs.readFileSync(path.join(BRIDGE_ROOT, 'config.json'), 'utf8'));
-  const skillsRoot = path.resolve(BRIDGE_ROOT, config.skillsRoot ?? '../card-forge-lab');
-  const cardsRoot = path.resolve(BRIDGE_ROOT, config.cardsRoot ?? path.join(skillsRoot, '..', 'cards'));
+  const skillsRoot = resolveSkillsRoot();
+  const cardsRoot = resolveCardsRoot();
   const adapter = new FileSyncAdapter({ skillsRoot, userDir: tavernUserDir(), cardsRoot });
   const dir = path.resolve(dirArg);
   if (!fs.existsSync(path.join(dir, 'card.md'))) fail('INVALID_PROJECT', '卡工程没有 card.md', 400);

@@ -445,8 +445,18 @@ export function mountSettings({ client, getContext, refreshCards }) {
             out.hidden = false;
         },
         'skills-deploy': async () => {
-            const res = await client.control('skillsDeploy');
+            // 先只读识别技能库与缺失项，再询问用户是否安装，不擅自执行
+            const status = await client.control('skillsStatus');
             const out = find('skills-output');
+            out.textContent = status.summary ?? JSON.stringify(status, null, 2);
+            out.hidden = false;
+            if (status.available === false) return;
+            const pending = status.missingNames ?? [];
+            const prompt = pending.length
+                ? `检测到 ${pending.length} 项技能缺失或有更新：\n${pending.join('、')}\n\n是否确认安装/同步到 TauriTavern 与本地环境？`
+                : '当前所有技能均已安装且为最新。是否仍要重新同步一次？';
+            if (!confirmAction(prompt)) return;
+            const res = await client.control('skillsDeploy');
             out.textContent = res.summary ?? JSON.stringify(res, null, 2);
             out.hidden = false;
         },

@@ -23,10 +23,11 @@ import { fail } from './safety.mjs';
 const exists = p => fs.existsSync(p);
 
 // 技能原件所在的项目（里面有 skills/ 和 skills-versions/）。不放在本项目里，本项目只管连通。
-// 顺序：环境变量 TT_SKILLS_ROOT → 本项目 config.json 的 skillsRoot。
+// 顺序：环境变量 TT_SKILLS_ROOT → 本项目 config.json 的 skillsRoot → 同级 ../card-forge-lab（若存在）。
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const rawSkillsRoot = process.env.TT_SKILLS_ROOT
-  ?? (exists(path.join(ROOT, 'config.json')) ? JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).skillsRoot : null);
+  ?? (exists(path.join(ROOT, 'config.json')) ? JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8')).skillsRoot : null)
+  ?? (exists(path.join(ROOT, '..', 'card-forge-lab', 'skills')) ? '../card-forge-lab' : null);
 const SKILLS_ROOT = rawSkillsRoot ? path.resolve(ROOT, rawSkillsRoot) : null;
 const IS_MAIN = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (IS_MAIN && (!SKILLS_ROOT || !exists(path.join(SKILLS_ROOT, 'skills')))) {
@@ -286,9 +287,18 @@ async function installScript() {
 }
 
 export async function inspectSkillsAndAgents({ skillsRoot = SKILLS_ROOT, userDir = tavernUserDir(), limcodeDir = DEFAULT_LIMCODE } = {}) {
-  const resolvedRoot = skillsRoot ? path.resolve(ROOT, skillsRoot) : null;
+  const resolvedRoot = skillsRoot ? path.resolve(ROOT, skillsRoot) : (SKILLS_ROOT ?? null);
   const srcDir = resolvedRoot ? path.join(resolvedRoot, 'skills') : '';
-  if (!srcDir || !exists(srcDir)) fail('SKILLS_ROOT_NOT_FOUND', '找不到技能原件目录 skills/', 404);
+  if (!srcDir || !exists(srcDir)) {
+    return {
+      available: false,
+      skills: [],
+      missingNames: [],
+      leftovers: [],
+      agentPrompt: { exists: false, path: srcDir, bytes: 0 },
+      summary: '未检测到可选的制卡技能库（skills/）。\n本插件已内置拆卡、装卡、校验与实时双向同步，无需安装制卡技能即可正常使用。',
+    };
+  }
   const archDir = path.join(resolvedRoot, 'skills-versions');
   const ttSkillsDir = path.join(path.dirname(userDir), '_tauritavern', 'skills', 'installed', 'global');
   const names = await listSourceSkills(srcDir);
@@ -318,7 +328,8 @@ export async function inspectSkillsAndAgents({ skillsRoot = SKILLS_ROOT, userDir
     ? { exists: true, path: agentPromptPath, bytes: fs.statSync(agentPromptPath).size }
     : { exists: false, path: agentPromptPath, bytes: 0 };
   lines.push(`Agent 全局提示词原件：${agentPrompt.exists ? `就绪（${agentPrompt.bytes} bytes）` : '未找到'}`);
-  return { skills, leftovers, agentPrompt, summary: lines.join('\n') };
+  const missingNames = skills.filter(s => s.limcode !== '最新' || s.tavern !== '最新' || !s.archived).map(s => s.name);
+  return { available: true, skills, missingNames, leftovers, agentPrompt, summary: lines.join('\n') };
 }
 
 export async function deploySkillsAndAgents({
@@ -333,9 +344,9 @@ export async function deploySkillsAndAgents({
   if (skipBackup && !acceptDataLossRisk) {
     fail('CONFIRMATION_REQUIRED', '不备份直接覆盖技能与 Agent 配置前，必须勾选确认自行承担数据丢失责任', 400);
   }
-  const resolvedRoot = skillsRoot ? path.resolve(ROOT, skillsRoot) : null;
+  const resolvedRoot = skillsRoot ? path.resolve(ROOT, skillsRoot) : (SKILLS_ROOT ?? null);
   const srcDir = resolvedRoot ? path.join(resolvedRoot, 'skills') : '';
-  if (!srcDir || !exists(srcDir)) fail('SKILLS_ROOT_NOT_FOUND', '找不到技能原件目录 skills/', 404);
+  if (!srcDir || !exists(srcDir)) fail('SKILLS_ROOT_NOT_FOUND', '未检测到可选的制卡技能库（skills/），无需同步技能。', 404);
   const archDir = path.join(resolvedRoot, 'skills-versions');
   const ttSkillsDir = path.join(path.dirname(userDir), '_tauritavern', 'skills', 'installed', 'global');
   const names = await listSourceSkills(srcDir);

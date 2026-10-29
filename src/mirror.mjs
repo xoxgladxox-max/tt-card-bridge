@@ -3,16 +3,14 @@ import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import path from 'node:path';
 import { BRIDGE_ROOT } from './connection.mjs';
-import { tavernUserDir } from './paths.mjs';
+import { tavernUserDir, resolveCardsRoot, resolveSkillsRoot, saveLocalBridgeConfig } from './paths.mjs';
 import { FileSyncAdapter } from './file-sync-adapter.mjs';
 import { SyncService } from './sync-service.mjs';
-import { startBridge, stopBridge } from './bridge.mjs';
+import { startBridge, stopBridge, getLastClientSeenAt } from './bridge.mjs';
 
 const configFile = path.join(BRIDGE_ROOT, 'config.json');
-const fallbackConfigFile = path.join(BRIDGE_ROOT, 'config.example.json');
-const config = JSON.parse(fs.readFileSync(fs.existsSync(configFile) ? configFile : fallbackConfigFile, 'utf8'));
-const skillsRoot = path.resolve(BRIDGE_ROOT, config.skillsRoot ?? '../card-forge-lab');
-const cardsRoot = path.resolve(BRIDGE_ROOT, process.argv[2] ?? config.cardsRoot ?? '../cards');
+const skillsRoot = resolveSkillsRoot();
+const cardsRoot = resolveCardsRoot(process.argv[2]);
 const adapter = new FileSyncAdapter({ skillsRoot, userDir: tavernUserDir() });
 let stopping = false, parentWatch = null;
 async function shutdown() {
@@ -24,9 +22,12 @@ async function shutdown() {
 }
 function saveCardsRoot(newRoot) {
   try {
-    const current = fs.existsSync(configFile) ? JSON.parse(fs.readFileSync(configFile, 'utf8')) : { ...config };
-    current.cardsRoot = newRoot;
-    fs.writeFileSync(configFile, JSON.stringify(current, null, 2) + '\n', 'utf8');
+    saveLocalBridgeConfig({ cardsRoot: newRoot });
+    if (fs.existsSync(configFile)) {
+      const current = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+      current.cardsRoot = newRoot;
+      fs.writeFileSync(configFile, JSON.stringify(current, null, 2) + '\n', 'utf8');
+    }
   } catch { /* ignore */ }
 }
 const service = new SyncService({ cardsRoot, runtimeRoot: path.join(BRIDGE_ROOT, '.runtime'), adapter, onShutdown: shutdown, onCardsRootChange: saveCardsRoot });
@@ -38,6 +39,8 @@ console.log(`同步服务已启动：${cardsRoot}；${service.state.paused ? '�
 // TT_BRIDGE_STAY=1 时不跟随（只用命令行、不开酒馆时用）
 const TAVERN_EXE = /^(tauritavern|tauri-tavern)\.exe$/i;
 function tavernAlive() {
+  // 普通酒馆（原生 SillyTavern）运行在浏览器里，靠前端扩展心跳判断；TauriTavern 同时支持进程名与前端心跳
+  if (getLastClientSeenAt() > 0 && Date.now() - getLastClientSeenAt() < 15000) return true;
   try { return execSync('tasklist /FO CSV /NH', { encoding: 'utf8', windowsHide: true }).split(/\r?\n/).some(line => TAVERN_EXE.test(line.split('","')[0].replace(/^"/, ''))); }
   catch { return true; } // 查不到时不乱退出
 }

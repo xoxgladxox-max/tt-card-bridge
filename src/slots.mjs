@@ -13,11 +13,10 @@ import { tavernCharDir, tavernUserDir } from './paths.mjs';
 import { contained, segment, readJson, atomicJson } from './safety.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const { skillsRoot: rawSkillsRoot } = JSON.parse(fs.readFileSync(path.join(ROOT, 'config.json'), 'utf8'));
-const skillsRoot = path.resolve(ROOT, rawSkillsRoot ?? '../card-forge-lab');
-export const forge = rel => import(pathToFileURL(path.join(skillsRoot, rel)).href);
-// 正则、脚本、变量的拆分规则只在 card-forge-lab 写一份，这里直接用
-export const extrasLib = await forge('src/lib/extras.mjs');
+const FORGE_ROOT = path.join(ROOT, 'src', 'forge');
+export const forge = rel => import(pathToFileURL(path.join(FORGE_ROOT, rel.replace(/^src[\\/]/, ''))).href);
+// 正则、脚本、变量的拆分规则直接用内置 forge 模块，不依赖外部技能仓库
+export const extrasLib = await forge('lib/extras.mjs');
 // 键名排序后的 JSON：正则、脚本等整项比对，键顺序不算差异
 const sortKeys = o => Array.isArray(o) ? o.map(sortKeys) : (o && typeof o === 'object') ? Object.fromEntries(Object.keys(o).sort().map(k => [k, sortKeys(o[k])])) : o;
 export const stableJson = v => JSON.stringify(sortKeys(v), null, 2);
