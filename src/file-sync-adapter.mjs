@@ -32,8 +32,18 @@ function settingDifferences(node, remote, prefix = '') {
   return out;
 }
 export class FileSyncAdapter {
-  constructor({ skillsRoot = null, userDir, cardsRoot = null, transport = publishCardJob, queryResult = getJobResult } = {}) { this.skillsRoot = skillsRoot ? path.resolve(BRIDGE_ROOT, skillsRoot) : null; this.userDir = userDir; this.cardsRoot = cardsRoot; this.transport = transport; this.queryResult = queryResult; }
+  constructor({ skillsRoot = null, userDir, cardsRoot = null, transport = publishCardJob, queryResult = getJobResult, directTransport = false } = {}) { this.skillsRoot = skillsRoot ? path.resolve(BRIDGE_ROOT, skillsRoot) : null; this.userDir = userDir; this.cardsRoot = cardsRoot; this.transport = transport; this.queryResult = queryResult; this.directTransport = directTransport; }
   operationFile(project) { return contained(project.dir, '.card-forge/operation.json'); }
+  clearPendingOperation(project) {
+    if (!project?.dir) return;
+    const opFile = this.operationFile(project);
+    if (fs.existsSync(opFile)) { try { fs.unlinkSync(opFile); } catch {} }
+    const bFile = contained(project.dir, '.card-forge/bridge.json');
+    if (fs.existsSync(bFile)) {
+      const b = readJson(bFile, {});
+      if (b && b.operation) atomicJson(bFile, { ...b, operation: null });
+    }
+  }
   localSnapshot(project) {
     const rawFiles = Object.fromEntries(nodeFiles(project.dir).map(rel => [rel, fs.readFileSync(contained(project.dir, rel), 'utf8')]));
     const file = contained(project.dir, '.card-forge/tavern-sync.json');
@@ -92,8 +102,21 @@ export class FileSyncAdapter {
     const file = this.operationFile(project); fs.mkdirSync(path.dirname(file), { recursive: true });
     try { fs.writeFileSync(file, JSON.stringify(operation, null, 2) + '\n', { flag: 'wx' }); }
     catch (e) { if (e.code === 'EEXIST') fail('OPERATION_PENDING', '已有未决写入'); throw e; }
-    const result = await this.transport(job, { timeoutMs: 150_000 });
-    if (!result || result.id !== job.id) fail('OPERATION_PENDING', '没有收到此任务的有效回执，已保留未决记录');
+    let result;
+    try {
+      result = await this.transport(job, { timeoutMs: 150_000 });
+    } catch (e) {
+      if (this.directTransport) {
+        try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch {}
+      }
+      throw e;
+    }
+    if (!result || result.id !== job.id) {
+      if (this.directTransport) {
+        try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch {}
+      }
+      fail('OPERATION_PENDING', '没有收到此任务的有效回执，已保留未决记录');
+    }
     this.finishOperation(project, operation, result);
     return result;
   }
@@ -163,7 +186,20 @@ export class FileSyncAdapter {
     const validation = protocol.validateNodes(scan);
     const blockingErrors = validation.errors.filter(e => e.rule !== 'P24');
     if (blockingErrors.length) fail('INVALID_PROJECT', protocol.formatReport({ errors: blockingErrors, warnings: [] }), 422);
-    const worldOverride = project.cardFile.startsWith('world:') ? null : readJson(contained(project.dir, '.card-forge/bridge.json'))?.worldOverride;
+    const bridgeFile = contained(project.dir, '.card-forge/bridge.json');
+    const savedBinding = readJson(bridgeFile, {});
+    const rawWorldOverride = project.cardFile.startsWith('world:') ? null : (savedBinding?.worldOverride ?? null);
+    const cardFm = scan.nodes.find(n => n.type === 'card')?.frontmatter ?? {};
+    const configuredWorld = cardFm.world || cardFm.world_book_name || cardFm?.tavern?.data?.extensions?.world || cardFm?.extensions?.world || null;
+    // 若工程文件夹已改名，或用户在 card.md 显式将世界书改成了与旧 worldOverride 基名不同的新名字，则旧 worldOverride 自动失效
+    const isStaleOverride = Boolean(rawWorldOverride && (
+      project.name !== project.projectName ||
+      (configuredWorld && rawWorldOverride !== configuredWorld && !rawWorldOverride.startsWith(`${configuredWorld} `))
+    ));
+    if (isStaleOverride && !project.staging && fs.existsSync(bridgeFile)) {
+      atomicJson(bridgeFile, { ...savedBinding, worldOverride: null });
+    }
+    const worldOverride = isStaleOverride ? null : rawWorldOverride;
     const fileStem = project.cardFile.startsWith('world:') ? null : path.basename(project.cardFile, '.png');
     const remoteName = remote.tavern.card?.data?.name ?? remote.tavern.card?.name ?? null;
     const cardNodeName = scan.nodes.find(n => n.type === 'card')?.frontmatter?.name ?? project.name;
@@ -484,16 +520,36 @@ export class FileSyncAdapter {
     if (result.avatar !== plan.cardFile) fail('CREATE_MISMATCH', `酒馆建卡后返回的文件名是 ${result.avatar}，不是 ${plan.cardFile}；需要核实`);
     return { cardFile: result.avatar, worldName: plan.worldName };
   }
-  hasPendingOperation(project) { return fs.existsSync(this.operationFile(project)); }  async rename(project, jobId) {
+  hasPendingOperation(project) { return fs.existsSync(this.operationFile(project)); }
+  async rename(project, jobId) {
     const snapshot = await this.snapshot(project);
-    const result = await this.send(project, { id: jobId, op: 'rename', avatar: project.cardFile, newName: project.name, expected: snapshot.expected, expectedTargetAbsent: true }, snapshot);
+    const cardFm = snapshot.nodes?.card?.frontmatter ?? {};
+    const configuredWorld = snapshot.card?.data?.extensions?.world || cardFm.world || cardFm.world_book_name || null;
+    // 如果原世界书与旧工程同名，或用户在 card.md 将世界书改成了新名字，则在改名时同步创建/绑定目标世界书
+    const targetWorld = configuredWorld === project.projectName ? project.name : configuredWorld;
+    const book = snapshot.card?.data?.character_book ?? null;
+    if (targetWorld && book) book.name = targetWorld;
+    const result = await this.send(project, {
+      id: jobId,
+      op: 'rename',
+      avatar: project.cardFile,
+      newName: project.name,
+      ...(targetWorld ? { worldName: targetWorld, book } : {}),
+      expected: snapshot.expected,
+      expectedTargetAbsent: true,
+    }, snapshot);
     if (!result || result.fatal) fail('RENAME_FAILED', result?.fatal ?? '酒馆未确认改名', 502);
     segment(result.avatar, '返回的卡文件名');
     if (result.avatar !== `${project.name}.png`) fail('RENAME_MISMATCH', `酒馆返回了不同文件名 ${result.avatar}；需要核实绑定`);
-    await this.setRoot(project, [[['name'], project.name]]);
+    const pairs = [[['name'], project.name]];
+    if (cardFm.world === project.projectName) pairs.push([['world'], project.name]);
+    if (cardFm.world_book_name === project.projectName) pairs.push([['world_book_name'], project.name]);
+    if (cardFm?.tavern?.data?.extensions?.world === project.projectName) pairs.push([['tavern', 'data', 'extensions', 'world'], project.name]);
+    if (cardFm?.tavern?.data?.character_book?.name === project.projectName) pairs.push([['tavern', 'data', 'character_book', 'name'], project.name]);
+    await this.setRoot(project, pairs);
     const file = contained(project.dir, '.card-forge/tavern-sync.json'), baseline = readJson(file);
     if (baseline?.cardFile === project.cardFile) atomicJson(file, { ...baseline, cardFile: result.avatar });
-    return { cardFile: result.avatar };
+    return { cardFile: result.avatar, worldName: targetWorld };
   }
   async validateWorldProject(project, worldName) {
     await this.assertAvailable({ ...project, cardFile: `world:${worldName}` });

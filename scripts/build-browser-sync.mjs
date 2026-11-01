@@ -668,12 +668,19 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           const file = await entry.getFile();
           if (file.size > 20 * 1024 * 1024) continue;
           const prev = diskCache.get(rel);
-          if (!prev || prev.mtimeMs !== file.lastModified || prev.size !== file.size || !__vfsFiles.has(vfsPath)) {
+          const isControlJson = rel.endsWith('/.card-forge/bridge.json') || rel === '.card-forge/bridge.json'
+            || rel.endsWith('/.card-forge/operation.json') || rel === '.card-forge/operation.json';
+          const hasPending = __vfsPendingDiskOps.some(item => item.rel === rel);
+          if (!hasPending && (!prev || prev.mtimeMs !== file.lastModified || prev.size !== file.size || !__vfsFiles.has(vfsPath) || isControlJson)) {
             const buf = new BrowserBuffer(await file.arrayBuffer());
-            __vfsEnsureDir(path.dirname(vfsPath), false);
-            __vfsFiles.set(vfsPath, { bytes: buf, mtimeMs: file.lastModified });
-            diskCache.set(rel, { mtimeMs: file.lastModified, size: file.size });
-            changed = true;
+            const curEntry = __vfsFiles.get(vfsPath);
+            const contentChanged = !curEntry || curEntry.bytes.length !== buf.length || !curEntry.bytes.equals(buf);
+            if (contentChanged || !prev || prev.mtimeMs !== file.lastModified || prev.size !== file.size) {
+              __vfsEnsureDir(path.dirname(vfsPath), false);
+              __vfsFiles.set(vfsPath, { bytes: buf, mtimeMs: file.lastModified });
+              diskCache.set(rel, { mtimeMs: file.lastModified, size: file.size });
+              if (contentChanged) changed = true;
+            }
           }
         }
       }
@@ -902,10 +909,24 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(job.world, null, 2) + '\\n', 'utf8', false);
         }
       }
-      else if (job.op === 'rename') report = await runRenameJob(job);
+      else if (job.op === 'rename') {
+        report = await runRenameJob(job);
+        if (job.avatar && report?.avatar && job.avatar !== report.avatar) {
+          __vfsFiles.delete(\`/tavern/default-user/characters/\${job.avatar}\`);
+          cardWorldCache.delete(job.avatar);
+        }
+        if (job.worldName && job.book) {
+          __vfsEnsureDir('/tavern/default-user/worlds', false);
+          __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(job.book, null, 2) + '\\n', 'utf8', false);
+        }
+      }
       else if (job.worldName && !job.card) report = await mutations.runWorld(job);
       else report = await mutations.runCard(job);
-      await syncTavernToVfs([job.avatar, report?.avatar].filter(Boolean), [job.worldName, job.card?.data?.extensions?.world].filter(Boolean), { force: true });
+      await syncTavernToVfs(
+        [job.avatar, report?.avatar].filter(Boolean),
+        [job.worldName, job.expected?.worldName, job.card?.data?.extensions?.world].filter(Boolean),
+        { force: true },
+      );
       return report;
     };
     adapter = new __mod_adapter.FileSyncAdapter({
@@ -914,12 +935,19 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       cardsRoot: '/workspace',
       transport,
       queryResult: async () => ({ pending: false }),
+      directTransport: true,
     });
     service = new __mod_service.SyncService({
       cardsRoot: '/workspace',
       runtimeRoot: '/runtime',
       adapter,
     });
+    // 浏览器直连模式为当前页面内单进程执行，不存在跨进程迟到回执；初始化时自动清理上次异常中断残留的未决锁
+    for (const p of service.projects()) {
+      if (p.pendingOperation) {
+        adapter.clearPendingOperation(p);
+      }
+    }
     return service;
   }
 
@@ -993,7 +1021,12 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         await svc.control({ action: 'followCard', cardFile: currentAvatar });
       }
       if (changed && !svc.state.paused) {
-        await svc.queue.run({ action: 'autoSync', projectId: null }, () => svc.batch('sync', null, true));
+        try {
+          await svc.queue.run({ action: 'autoSync', projectId: null }, () => svc.batch('sync', null, true));
+        } finally {
+          await flushVfsToDisk();
+        }
+      } else {
         await flushVfsToDisk();
       }
       return formatStatus(await svc.status());
@@ -1011,8 +1044,12 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       const extraWorlds = [args.worldName].filter(Boolean);
       await syncTavernToVfs(extraCards, extraWorlds, { force: true });
       const svc = await ensureService();
-      const res = await svc.control({ ...args, action });
-      await flushVfsToDisk();
+      let res;
+      try {
+        res = await svc.control({ ...args, action });
+      } finally {
+        await flushVfsToDisk();
+      }
       return res && typeof res === 'object' && 'cardsRoot' in res ? formatStatus(res) : res;
     },
     async startSync() {

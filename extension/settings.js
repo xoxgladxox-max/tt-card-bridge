@@ -243,36 +243,58 @@ export function mountSettings({ client, getContext, refreshCards }) {
         }
     }
     const keptExtras = () => [...find('extras').querySelectorAll('input[data-extra-key]')].filter(cb => !cb.checked).map(cb => cb.dataset.extraKey);
-    // 断开后重连两边不一致、连着时两边都改了、原来的卡已不在：同步停下，只给两个选择（作者决定 2026-10-27）
+    // 断开后重连两边不一致、连着时两边都改了、原来的卡已不在、或上次建卡/改名未决卡住：同步停下，提供恢复选择
     function showReconnectIfAny() {
         const p = selectedProject();
-        const waiting = p && (p.status === 'needsReconnect' || p.status === 'cardMissing');
+        const isPendingOp = Boolean(p && (p.status === 'operationPending' || p.status === 'reviewRequired' || p.pendingOperation));
+        const waiting = p && (p.status === 'needsReconnect' || p.status === 'cardMissing' || isPendingOp);
         if (!waiting) { if (conflictShownFor) { find('diff').replaceChildren(); conflictShownFor = ''; } return; }
         const r = p.lastResult ?? {};
-        const onlyNew = p.status === 'cardMissing' || r.onlyNew === true;
-        const sig = `${p.id}|${onlyNew}|${r.diff?.revision ?? ''}`;
+        const onlyNew = p.status === 'cardMissing' || r.onlyNew === true || !p.cardFile;
+        const opKey = p.pendingOperation ? `${p.pendingOperation.kind ?? 'op'}:${p.pendingOperation.id ?? p.pendingOperation.jobId ?? ''}` : '';
+        const sig = `${p.id}|${p.status}|${onlyNew}|${opKey}|${r.diff?.revision ?? ''}`;
         if (conflictShownFor === sig || busy) return;
         conflictShownFor = sig;
         const box = find('diff');
         box.replaceChildren();
         const items = [...(r.diff?.changedSlots ?? []).map(s => s.label ?? s.key), ...(r.diff?.issues ?? []).map(i => i.message)];
-        box.append(element('p', onlyNew
-            ? `「${p.id}」原来连的「${p.missingCardFile ?? p.cardFile}」已不在酒馆里，同步已停下。只能新建卡：`
-            : `「${p.id}」和酒馆里的「${p.cardFile}」不一致${items.length ? `（${items.length} 项）` : ''}，同步已停下。选一个：`, 'ttcb-warning'));
+        if (isPendingOp) {
+            const opDesc = p.pendingOperation?.kind === 'rename'
+                ? `改名 → ${p.pendingOperation.targetCardFile ?? `${p.name}.png`}`
+                : p.pendingOperation?.kind === 'create'
+                    ? `新建卡 → ${p.pendingOperation.targetCardFile ?? `${p.name}.png`}`
+                    : '写入任务';
+            box.append(element('p', `「${p.id}」存在未完成的上次任务记录（${opDesc}），同步已暂停。请选择恢复方式：`, 'ttcb-warning'));
+        } else {
+            box.append(element('p', onlyNew
+                ? `「${p.id}」原来连的「${p.missingCardFile ?? p.cardFile}」已不在酒馆里，同步已停下。只能新建卡：`
+                : `「${p.id}」和酒馆里的「${p.cardFile}」不一致${items.length ? `（${items.length} 项）` : ''}，同步已停下。选一个：`, 'ttcb-warning'));
+        }
         if (items.length) {
             const fold = element('details');
             fold.append(element('summary', '看是哪些'), element('small', [...new Set(items)].slice(0, 40).join('、')));
             box.append(fold);
         }
         const row = element('div', undefined, 'flex-container');
+        if (isPendingOp) {
+            row.append(serviceButton('清除未决记录并重连', async () => {
+                const res = await client.control('connect', { projectId: p.id, clearPending: true });
+                if (res.status === 'needsReconnect') { conflictShownFor = ''; return; }
+                const cardFile = res.cardFile ?? res.project?.cardFile;
+                await openCard(cardFile);
+                done(`已清除未决记录并把「${p.id}」连到「${cardFile}」，之后实时同步。`);
+            }));
+        }
         if (!onlyNew) row.append(serviceButton('以本地为准覆盖', async () => {
             if (!confirmAction(`把本地工程「${p.id}」整个写进酒馆里的「${p.cardFile}」和它的世界书。\n断开期间在酒馆里做的改动不保留；聊天记录不动。继续？`)) return;
-            const res = await client.control('reconnectOverwrite', { projectId: p.id });
-            done(`已以本地为准覆盖「${res.project?.cardFile ?? p.cardFile}」，已连上，之后实时同步。`);
+            const res = await client.control('reconnectOverwrite', { projectId: p.id, clearPending: true });
+            const targetCard = res.cardFile ?? res.project?.cardFile ?? p.cardFile;
+            await openCard(targetCard);
+            done(`已以本地为准覆盖「${targetCard}」，已连上，之后实时同步。`);
         }));
         row.append(serviceButton('新建卡', async () => {
             if (!confirmAction(`按本地工程「${p.id}」新建一张卡和一本世界书（重名会起新名字，不连旧的同名世界书），之后连到新卡。\n${onlyNew ? '' : `旧卡「${p.cardFile}」留在酒馆里不动。`}继续？`)) return;
-            const res = await client.control('reconnectNew', { projectId: p.id });
+            const res = await client.control('reconnectNew', { projectId: p.id, clearPending: true });
             await openCard(res.cardFile);
             done(`已新建「${res.cardFile}」${res.worldName ? `和世界书「${res.worldName}」` : ''}，已连上，之后实时同步。`);
         }));
@@ -473,12 +495,13 @@ export function mountSettings({ client, getContext, refreshCards }) {
         connect: async () => {
             const p = assembleTarget();
             if (!p) throw new Error('请先在下方「工作区」下拉框中选择要连接的本地卡工程。');
+            const hasPending = Boolean(p.pendingOperation || p.status === 'operationPending' || p.status === 'reviewRequired');
             const ask = p.cardFile
-                ? `把卡工程「${p.id}」连到酒馆里的「${p.cardFile}」？\n两边一致就直接连上；不一致会让你选「以本地为准覆盖」或「新建卡」。`
+                ? `把卡工程「${p.id}」连到酒馆里的「${p.cardFile}」？${hasPending ? '\n（将同时清除上次未完成的改名/写入记录）' : ''}\n两边一致就直接连上；不一致会让你选「以本地为准覆盖」或「新建卡」。`
                 : `卡工程「${p.id}」还没进过酒馆。按本地工程新建一张卡和一本世界书（重名会起新名字），之后实时同步。继续？`;
             if (!confirmAction(ask)) return;
             if (state?.paused !== false) state = await client.control('resume');
-            const res = await client.control('connect', { projectId: p.id });
+            const res = await client.control('connect', { projectId: p.id, clearPending: true });
             if (res.status === 'needsReconnect') { conflictShownFor = ''; return; }
             const cardFile = res.cardFile ?? res.project?.cardFile;
             await openCard(cardFile);

@@ -1,9 +1,9 @@
 // One authenticated loopback connection serves the settings panel and queued tasks.
 // 带上版本号查询参数，避免在酒馆点「更新扩展」后浏览器继续使用旧版子模块缓存
-import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.6';
-import { mountSettings } from './settings.js?v=0.3.6';
-import { createTavernMutations } from './tavern-mutations.js?v=0.3.6';
-import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.6';
+import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.7';
+import { mountSettings } from './settings.js?v=0.3.7';
+import { createTavernMutations } from './tavern-mutations.js?v=0.3.7';
+import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.7';
 
 const TAG = '[tt-card-bridge]';
 let known = null;
@@ -86,16 +86,28 @@ async function runRenameJob(job) {
   const cur = st.characterId;
   const prev = cur === undefined || cur === null || cur === '' ? null : st.characters[Number(cur)]?.avatar ?? null;
   if (String(cur) !== String(idx)) await st.selectCharacterById(idx, { switchMenu: false });
+  st = ctx();
+  const activeIdx = Number(st.characterId ?? idx);
+  // 若卡内 name 之前已被改成了新名字（而文件名 avatar 仍是旧名），SillyTavern 的 renameCharacter 会因 newValue === characters[this_chid].name 直接返回 false。
+  // 这里先将内存中的 name 临时置回旧文件名基底，使 /rename-char 正常调用 /api/characters/rename 完成文件名与关联数据的改名。
+  if (st.characters[activeIdx] && st.characters[activeIdx].name === String(job.newName)) {
+    const fallbackOldName = String(job.avatar).replace(/\.png$/i, '');
+    st.characters[activeIdx].name = fallbackOldName !== String(job.newName) ? fallbackOldName : `${job.newName}__old`;
+  }
   const quoted = '"' + String(job.newName).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
   const res = await st.executeSlashCommandsWithOptions(`/rename-char silent=true chats=true ${quoted}`, { handleParserErrors: false, handleExecutionErrors: false });
   if (String(res?.pipe) !== 'true') throw new Error(`酒馆没有改名（/rename-char 返回 ${res?.pipe}）`);
   st = ctx();
-  const avatar = st.characters[Number(st.characterId)]?.avatar;
+  const avatar = st.characters[Number(st.characterId)]?.avatar ?? `${job.newName}.png`;
+  let world = null;
+  if (job.worldName && (job.book?.entries || job.worldName !== job.expected?.worldName)) {
+    world = await mutations.syncCardWorldAfterRename(avatar, job.worldName, job.book);
+  }
   if (prev && prev !== job.avatar) {
     const back = st.characters.findIndex(c => c.avatar === prev);
     if (back >= 0) await st.selectCharacterById(back, { switchMenu: false });
   }
-  return { id: job.id, avatar };
+  return { id: job.id, avatar, ...(world ? { world } : {}) };
 }
 
 // 把文本里的旧技能名换成新名；已经带 cf- 前缀的不动。新名为 null 的是已删除的技能：文本里不动，只从技能列表里去掉

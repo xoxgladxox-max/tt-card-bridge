@@ -86,23 +86,38 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
         try { await refreshWorld(job.worldName); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
         return report;
     }
-    async function runCard(job) {
-        await assertExpected(job);
-        await request('/api/characters/merge-attributes', { ...job.card, avatar: job.avatar });
-        const report = { id: job.id, avatar: job.avatar, card: 'written' };
-        const name = job.card.data?.extensions?.world;
-        const book = job.card.data?.character_book;
-        if (name && book?.entries) {
-            // Card and world are separate upstream operations. If this fails after
-            // the card write, the service reports the error and the card waits for reconnect.
-            const actual = await worldDigest(await readWorld(job.expected.worldName));
-            if (actual !== job.expected.world) throw new Error('角色卡已写入，但世界书发生并发变化；已停止后续写入。请重新连接。');
-            report.world = await syncWorld(name, book);
-            try { await refreshWorld(name); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
-        } else report.world = { skipped: name ? '节点没有内嵌条目，未改外置世界书' : '卡未绑定外置世界书' };
-        try { report.refreshed = await refreshCards([job.avatar]); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
-        return report;
-    }
+  async function runCard(job) {
+    await assertExpected(job);
+    await request('/api/characters/merge-attributes', { ...job.card, avatar: job.avatar });
+    const report = { id: job.id, avatar: job.avatar, card: 'written' };
+    const name = job.card.data?.extensions?.world;
+    const book = job.card.data?.character_book;
+    if (name && (book?.entries || name !== job.expected?.worldName)) {
+      // Card and world are separate upstream operations. If this fails after
+      // the card write, the service reports the error and the card waits for reconnect.
+      if (job.expected?.worldName) {
+        const actual = await worldDigest(await readWorld(job.expected.worldName));
+        if (actual !== job.expected.world) throw new Error('角色卡已写入，但世界书发生并发变化；已停止后续写入。请重新连接。');
+      }
+      report.world = await syncWorld(name, book ?? { entries: [] });
+      if (name !== job.expected?.worldName) {
+        await request('/api/characters/merge-attributes', { avatar: job.avatar, data: { extensions: { world: name } } });
+      }
+      try { await refreshWorld(name); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
+    } else report.world = { skipped: name ? '节点没有内嵌条目，未改外置世界书' : '卡未绑定外置世界书' };
+    try { report.refreshed = await refreshCards([job.avatar]); } catch (error) { report.refreshWarning = String(error?.message ?? error); }
+    return report;
+  }
+  async function syncCardWorldAfterRename(avatar, worldName, book) {
+    if (!worldName) return null;
+    const world = await syncWorld(worldName, book ?? { entries: [] });
+    await request('/api/characters/merge-attributes', { avatar, data: { extensions: { world: worldName } } });
+    try {
+      await refreshWorld(worldName);
+      await refreshCards([avatar]);
+    } catch {}
+    return world;
+  }
     // 新建卡（作者决定 2026-10-27）：后台按本地工程合成好 PNG，卡名和世界书名都已避开重名。
     // 用酒馆自己的导入接口建卡（preserved_name 固定文件名），再新建世界书；不碰已有的卡和世界书
     async function create(job) {
@@ -132,5 +147,5 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
             report.refreshed = await refreshCards([avatar]);
         } catch (error) { report.refreshWarning = String(error?.message ?? error); }
         return report;
-    }    return { assertExpected, runWorld, runCard, create };
+    }    return { assertExpected, runWorld, runCard, create, syncCardWorldAfterRename };
 }

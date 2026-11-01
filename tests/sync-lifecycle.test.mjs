@@ -206,3 +206,52 @@ test('panel attachWorld unpacks standalone world, export writes dist without dir
   await new Promise(r => setTimeout(r, 80));
   assert.equal(shut, true);
 });
+
+test('rename failure cleans up bridge operation, directTransport clears failed operation.json, stale worldOverride is cleared, and rename syncs target worldbook', async t => {
+  const f = await fixture(t);
+  // 1. 设一个旧 worldOverride: 'A'，并将工程目录从 A 改名为 RenamedA，同时在 card.md 将 world 改为 RenamedA
+  const oldDir = f.project.dir;
+  const newDir = path.join(f.cardsRoot, 'RenamedA');
+  const bridgeFile = path.join(oldDir, '.card-forge', 'bridge.json');
+  atomicJson(bridgeFile, { ...JSON.parse(fs.readFileSync(bridgeFile, 'utf8')), worldOverride: 'A' });
+  fs.renameSync(oldDir, newDir);
+  const cardMdPath = path.join(newDir, 'card.md');
+  const cardMd = fs.readFileSync(cardMdPath, 'utf8').replace(/name:\s*A/, 'name: RenamedA\nworld: RenamedA\nworld_book_name: RenamedA');
+  fs.writeFileSync(cardMdPath, cardMd, 'utf8');
+
+  // 2. 模拟 directTransport 模式下第一次改名抛错：operation.json 与 bridge.json.operation 均应被自动清除，不留死锁
+  f.adapter.directTransport = true;
+  const origTransport = f.adapter.transport;
+  f.adapter.transport = async () => { throw new Error('模拟酒馆改名报错'); };
+  await assert.rejects(f.service.control({ action: 'connect', projectId: 'RenamedA' }), /模拟酒馆改名报错/);
+  assert.equal(fs.existsSync(path.join(newDir, '.card-forge', 'operation.json')), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(newDir, '.card-forge', 'bridge.json'), 'utf8')).operation, null);
+
+  // 3. 若因历史原因残留了 operation，clearPending: true 或 clearPending 动作可一键恢复并完成改名 + 世界书联动
+  atomicJson(path.join(newDir, '.card-forge', 'bridge.json'), {
+    ...JSON.parse(fs.readFileSync(path.join(newDir, '.card-forge', 'bridge.json'), 'utf8')),
+    operation: { id: 'stuck-op', kind: 'rename', targetCardFile: 'RenamedA.png' },
+  });
+  f.adapter.transport = async job => {
+    const res = await origTransport(job);
+    if (job.op === 'rename' && job.worldName) {
+      atomicJson(path.join(f.userDir, 'worlds', `${job.worldName}.json`), {
+        entries: Object.fromEntries((job.book?.entries ?? []).map((e, i) => [String(e.id ?? i), { uid: e.id ?? i, content: e.content, comment: e.comment, key: e.keys ?? [] }])),
+      });
+      const renamedPng = path.join(f.userDir, 'characters', 'RenamedA.png');
+      const cardObj = readCardPng(renamedPng);
+      cardObj.data.extensions = { ...(cardObj.data.extensions ?? {}), world: job.worldName };
+      fs.writeFileSync(renamedPng, embedChara(image, cardObj));
+    }
+    return res;
+  };
+  const connected = await f.service.control({ action: 'connect', projectId: 'RenamedA', clearPending: true });
+  assert.equal(connected.cardFile, 'RenamedA.png');
+  const updatedBridge = JSON.parse(fs.readFileSync(path.join(newDir, '.card-forge', 'bridge.json'), 'utf8'));
+  assert.equal(updatedBridge.cardFile, 'RenamedA.png');
+  assert.equal(updatedBridge.projectName, 'RenamedA');
+  assert.equal(updatedBridge.worldOverride, null);
+  assert.equal(updatedBridge.operation, null);
+  assert.equal(fs.existsSync(path.join(f.userDir, 'worlds', 'RenamedA.json')), true);
+});
+
