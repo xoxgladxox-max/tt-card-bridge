@@ -514,6 +514,14 @@ test('connect and reconnectNew / reconnectOverwrite: unattached creates new card
   assert.equal(asNew.worldName, 'Book 3');
   assert.ok(fs.existsSync(path.join(f.userDir, 'characters', 'A 3.png')));
   assert.ok(fs.existsSync(path.join(f.userDir, 'worlds', 'Book 3.json')));
+
+  // 3. 允许覆盖模式（overwrite: true / preferSameName: true）：直接覆盖已有的同名卡 A.png 和同名世界书 Book，不生成数字后缀副本
+  const direct = await f.service.control({ action: 'connect', projectId: 'A', overwrite: true });
+  assert.equal(direct.cardFile, 'A.png');
+  assert.equal(direct.status, 'clean');
+  assert.equal(readCardPng(f.pngPath).data.description, 'new local card');
+  const bookAfter = JSON.parse(fs.readFileSync(path.join(f.userDir, 'worlds', 'Book.json'), 'utf8'));
+  assert.equal(bookAfter.entries['1'].content, 'new world body');
 });
 test('overwrite attach keeps non-card files (records, candidates, notes, research) without creating backups', async t => {
   const f = await fileFixture(t, true);

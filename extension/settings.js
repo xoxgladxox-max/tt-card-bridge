@@ -56,7 +56,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步 <small class="ttcb-dim">v0.3.9</small></b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.4.0</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
@@ -267,7 +267,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
             box.append(element('p', `「${p.id}」存在未完成的上次任务记录（${opDesc}），同步已暂停。请选择恢复方式：`, 'ttcb-warning'));
         } else {
             box.append(element('p', onlyNew
-                ? `「${p.id}」原来连的「${p.missingCardFile ?? p.cardFile}」已不在酒馆里，同步已停下。只能新建卡：`
+                ? `「${p.id}」原来连的「${p.missingCardFile ?? p.cardFile}」已不在酒馆里，同步已停下。可直接覆盖/按原名写入，或新建副本：`
                 : `「${p.id}」和酒馆里的「${p.cardFile}」不一致${items.length ? `（${items.length} 项）` : ''}，同步已停下。选一个：`, 'ttcb-warning'));
         }
         if (items.length) {
@@ -285,10 +285,14 @@ export function mountSettings({ client, getContext, refreshCards }) {
                 done(`已清除未决记录并把「${p.id}」连到「${cardFile}」，之后实时同步。`);
             }));
         }
-        if (!onlyNew) row.append(serviceButton('以本地为准覆盖', async () => {
-            if (!confirmAction(`把本地工程「${p.id}」整个写进酒馆里的「${p.cardFile}」和它的世界书。\n断开期间在酒馆里做的改动不保留；聊天记录不动。继续？`)) return;
-            const res = await client.control('reconnectOverwrite', { projectId: p.id, clearPending: true });
-            const targetCard = res.cardFile ?? res.project?.cardFile ?? p.cardFile;
+        row.append(serviceButton('以本地为准覆盖', async () => {
+            const sameNameAvatar = `${p.name ?? p.id}.png`;
+            const sameCardInTavern = (getContext()?.characters ?? []).find(c => c.avatar?.toLowerCase() === sameNameAvatar.toLowerCase())?.avatar ?? null;
+            const preferSameName = Boolean(sameCardInTavern && (/ \d+\.png$/i.test(p.cardFile) || p.status === 'cardMissing' || !p.cardFile));
+            const targetLabel = preferSameName ? sameCardInTavern : (onlyNew ? sameNameAvatar : p.cardFile);
+            if (!confirmAction(`把本地工程「${p.id}」整个写进酒馆里的「${targetLabel}」和它的世界书。\n断开期间在酒馆里做的改动不保留；聊天记录不动。继续？`)) return;
+            const res = await client.control('reconnectOverwrite', { projectId: p.id, clearPending: true, allowCreateIfMissing: true, preferSameName });
+            const targetCard = res.cardFile ?? res.project?.cardFile ?? targetLabel;
             await openCard(targetCard);
             done(`已以本地为准覆盖「${targetCard}」，已连上，之后实时同步。`);
         }));
@@ -496,13 +500,28 @@ export function mountSettings({ client, getContext, refreshCards }) {
             const p = assembleTarget();
             if (!p) throw new Error('请先在下方「工作区」下拉框中选择要连接的本地卡工程。');
             const hasPending = Boolean(p.pendingOperation || p.status === 'operationPending' || p.status === 'reviewRequired');
-            const ask = p.cardFile
-                ? `把卡工程「${p.id}」连到酒馆里的「${p.cardFile}」？${hasPending ? '\n（将同时清除上次未完成的改名/写入记录）' : ''}\n两边一致就直接连上；不一致会让你选「以本地为准覆盖」或「新建卡」。`
-                : `卡工程「${p.id}」还没进过酒馆。按本地工程新建一张卡和一本世界书（重名会起新名字），之后实时同步。继续？`;
+            const sameNameAvatar = `${p.name ?? p.id}.png`;
+            const sameCardInTavern = (getContext()?.characters ?? []).find(c => c.avatar?.toLowerCase() === sameNameAvatar.toLowerCase())?.avatar ?? null;
+            const useDirectOverwrite = !p.cardFile || Boolean(sameCardInTavern && (/ \d+\.png$/i.test(p.cardFile) || p.status === 'cardMissing'));
+            const targetLabel = sameCardInTavern ?? p.cardFile ?? sameNameAvatar;
+            const ask = useDirectOverwrite
+                ? (sameCardInTavern
+                    ? `酒馆里已有同名角色卡「${sameCardInTavern}」。\n是否直接以本地工程「${p.id}」为准覆盖「${sameCardInTavern}」和它的世界书，并开启实时同步？`
+                    : `卡工程「${p.id}」还没进过酒馆。按本地工程写入「${sameNameAvatar}」和对应世界书（若世界书已存在则直接覆盖），之后实时同步。继续？`)
+                : `把卡工程「${p.id}」连到酒馆里的「${targetLabel}」？${hasPending ? '\n（将同时清除上次未完成的改名/写入记录）' : ''}\n两边一致就直接连上；若不一致将询问是否直接以本地为准覆盖。`;
             if (!confirmAction(ask)) return;
             if (state?.paused !== false) state = await client.control('resume');
-            const res = await client.control('connect', { projectId: p.id, clearPending: true });
-            if (res.status === 'needsReconnect') { conflictShownFor = ''; return; }
+            let res = await client.control('connect', { projectId: p.id, clearPending: true, ...(useDirectOverwrite ? { overwrite: true } : {}) });
+            if (res.status === 'needsReconnect') {
+                const reconnCard = res.cardFile ?? res.project?.cardFile ?? targetLabel;
+                const diffItems = [...(res.diff?.changedSlots ?? []).map(s => s.label ?? s.key), ...(res.diff?.issues ?? []).map(i => i.message)];
+                if (confirmAction(`「${p.id}」与酒馆里的「${reconnCard}」内容不一致${diffItems.length ? `（共 ${diffItems.length} 项差异）` : ''}。\n是否直接以本地工程为准覆盖「${reconnCard}」和它的世界书？`)) {
+                    res = await client.control('reconnectOverwrite', { projectId: p.id, clearPending: true, allowCreateIfMissing: true, preferSameName: Boolean(sameCardInTavern) });
+                } else {
+                    conflictShownFor = '';
+                    return;
+                }
+            }
             const cardFile = res.cardFile ?? res.project?.cardFile;
             await openCard(cardFile);
             done(`已把「${p.id}」连到「${cardFile}」，之后实时同步。`);

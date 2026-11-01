@@ -10894,7 +10894,7 @@ class SyncEngine {
       const prepared = await this.adapter.snapshot(project);
       if ((plannedLocal ? prepared.localHash !== plannedLocal : nodeSignature(prepared) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(prepared) !== plannedNodes)) fail('STALE_LOCAL', '决定后本地文件又改变；没有推送未经预览的内容');
       if (JSON.stringify(prepared.expected) !== JSON.stringify(before.expected)) fail('STALE_REMOTE', '酒馆内容已改变；未推送');
-      await this.adapter.push(project, prepared);
+      await this.adapter.push(project, prepared, { replaceRemote });
     }
     const after = await this.adapter.snapshot(project);
     if ((plannedLocal ? after.localHash !== plannedLocal : nodeSignature(after) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(after) !== plannedNodes)) fail('STALE_LOCAL', '操作期间工程改变；没有更新同步基线');
@@ -11286,7 +11286,7 @@ class FileSyncAdapter {
       planned[rel] = text;
     }
   }
-  async push(project, snapshot) {
+  async push(project, snapshot, { replaceRemote = false } = {}) {
     const worldOnly = project.cardFile.startsWith('world:');
     const card = worldOnly ? null : structuredClone(snapshot.card);
     if (card) {
@@ -11299,7 +11299,12 @@ class FileSyncAdapter {
       if (had('regex:') && !has('regex:')) x.regex_scripts = [];
       if (had('script:') && !has('script:')) (x.tavern_helper ??= {}).scripts = [];
     }
-    const job = { id: crypto.randomUUID(), expected: snapshot.expected, ...(worldOnly ? { worldName: project.cardFile.slice(6), book: snapshot.card.data.character_book ?? { entries: [] } } : { avatar: project.cardFile, card }) };
+    const job = {
+      id: crypto.randomUUID(),
+      expected: snapshot.expected,
+      ...(replaceRemote ? { replaceRemote: true, allowTargetWorldOverwrite: true } : {}),
+      ...(worldOnly ? { worldName: project.cardFile.slice(6), book: snapshot.card.data.character_book ?? { entries: [] } } : { avatar: project.cardFile, card }),
+    };
     const result = await this.send(project, job, snapshot);
     if (!result || result.fatal) fail('TRANSPORT_FAILED', result?.fatal ?? '酒馆未确认写入', 502);
     return result;
@@ -11394,12 +11399,15 @@ class FileSyncAdapter {
   }
   // 新建卡（作者决定 2026-10-27）：按本地工程新建一张卡和一本世界书。卡文件名和世界书名重名时都起新名字，
   // 新卡不连酒馆里已有的同名世界书。只算名字，不写任何东西
-  async planNewCard(project) {
+  async planNewCard(project, { allowOverwrite = false } = {}) {
     const libs = await this.libraries();
     const scan = await this.scanLocal(project, libs);
     const built = this.assembleCard(scan, libs.build, null);
     const configured = built.card.data?.extensions?.world || null;
     const desiredWorld = configured || (built.bookCount > 0 ? (built.card.data?.character_book?.name || project.name) : null);
+    if (allowOverwrite) {
+      return { cardFile: `${project.name}.png`, worldName: desiredWorld, worldOverride: null, allowOverwrite: true };
+    }
     const free = (base, taken) => { for (let i = 1; ; i++) { const name = i === 1 ? base : `${base} ${i}`; if (!taken.has(name.toLowerCase())) return name; } };
     const cards = new Set(this.listCards().map(c => c.name.toLowerCase()));
     const worlds = new Set(this.listWorlds().map(w => w.worldName.toLowerCase()));
@@ -11423,12 +11431,33 @@ class FileSyncAdapter {
     const card = this.assembleCard(scan, libs.build, plan.worldName, path.basename(plan.cardFile, '.png')).card;
     const pngBase64 = libs.png.embedChara(this.coverOf(project), card).toString('base64');
     const book = card.data?.character_book ?? { entries: [] };
-    const result = await this.send(project, { id: jobId, op: 'create', avatar: plan.cardFile, pngBase64, worldName: plan.worldName, book });
+    const result = await this.send(project, {
+      id: jobId,
+      op: 'create',
+      avatar: plan.cardFile,
+      pngBase64,
+      worldName: plan.worldName,
+      book,
+      ...(plan.allowOverwrite ? { allowOverwrite: true, card } : {}),
+    });
     if (!result || result.fatal) fail('CREATE_FAILED', result?.fatal ?? '酒馆没有确认建卡', 502);
     if (result.avatar !== plan.cardFile) fail('CREATE_MISMATCH', `酒馆建卡后返回的文件名是 ${result.avatar}，不是 ${plan.cardFile}；需要核实`);
     return { cardFile: result.avatar, worldName: plan.worldName };
   }
   hasPendingOperation(project) { return fs.existsSync(this.operationFile(project)); }
+  async syncRootName(project) {
+    const libs = await this.libraries();
+    const scan = await this.scanLocal(project, libs);
+    const cardFm = scan.nodes.find(n => n.type === 'card')?.frontmatter ?? {};
+    const pairs = [[['name'], project.name]];
+    if (cardFm.world === project.projectName) pairs.push([['world'], project.name]);
+    if (cardFm.world_book_name === project.projectName) pairs.push([['world_book_name'], project.name]);
+    if (cardFm?.tavern?.data?.extensions?.world === project.projectName) pairs.push([['tavern', 'data', 'extensions', 'world'], project.name]);
+    if (cardFm?.tavern?.data?.character_book?.name === project.projectName) pairs.push([['tavern', 'data', 'character_book', 'name'], project.name]);
+    await this.setRoot(project, pairs);
+    const file = contained(project.dir, '.card-forge/tavern-sync.json'), baseline = readJson(file);
+    if (baseline?.cardFile === project.cardFile) atomicJson(file, { ...baseline, cardFile: `${project.name}.png` });
+  }
   async rename(project, jobId) {
     const snapshot = await this.snapshot(project);
     const cardFm = snapshot.nodes?.card?.frontmatter ?? {};
@@ -11451,6 +11480,7 @@ class FileSyncAdapter {
       ...(targetWorld ? { worldName: targetWorld, book } : {}),
       expected: snapshot.expected,
       expectedTargetAbsent: true,
+      allowTargetWorldOverwrite: true,
     }, snapshot);
     if (!result || result.fatal) fail('RENAME_FAILED', result?.fatal ?? '酒馆未确认改名', 502);
     segment(result.avatar, '返回的卡文件名');
@@ -11632,6 +11662,14 @@ class SyncService {
   cardMissing(p) {
     return p.attached && p.targetKind !== 'world' && !p.pendingOperation && !this.cardExists(p.cardFile);
   }
+  findSameNameCard(p) {
+    if (!p || p.targetKind === 'world' || !p.name || typeof this.adapter.listCards !== 'function') return null;
+    const wanted = `${p.name}.png`.toLowerCase();
+    const found = this.adapter.listCards().find(c => c.cardFile.toLowerCase() === wanted);
+    if (!found) return null;
+    const occupied = this.projects().some(o => !sameProjectPath(o.dir, p.dir) && targetOccupied(o, found.cardFile));
+    return occupied ? null : found.cardFile;
+  }
   decorateProject(p) {
     const result = this.results.get(p.id) ?? null;
     const missing = this.cardMissing(p);
@@ -11793,10 +11831,10 @@ class SyncService {
     return { results };
   }
   // 新建卡：按本地工程新建一张卡和一本世界书（重名都起新名字，不连旧的同名世界书），之后连到新卡。旧卡留在酒馆里
-  async createNewCard(p) {
+  async createNewCard(p, { allowOverwrite = false } = {}) {
     if (p.targetKind === 'world') fail('INVALID_ACTION', '独立世界书工程不能新建角色卡', 400);
     if (p.pendingOperation) fail('OPERATION_PENDING', '上次建卡或改名没有完成；不会重复执行');
-    const plan = await this.adapter.planNewCard(p);
+    const plan = await this.adapter.planNewCard(p, { allowOverwrite });
     const id = crypto.randomUUID();
     this.disconnect(p.id);
     this.writeBinding(p, { operation: { id, kind: 'create', targetCardFile: plan.cardFile } });
@@ -11872,6 +11910,7 @@ class SyncService {
         // 连接（作者决定 2026-10-27：只能从本地工程连到酒馆）：
         //   没连过（或原来那张卡已不在）→ 新建卡；连过 → 两边一致直接连上，不一致停下等作者选
         case 'connect': {
+          const allowOverwrite = Boolean(body.overwrite);
           let p = this.getProject(body.projectId, { attached: false });
           if (body.clearPending && p.pendingOperation) {
             this.adapter.clearPendingOperation?.(p);
@@ -11880,14 +11919,37 @@ class SyncService {
             p = this.getProject(body.projectId, { attached: false });
           }
           if (p.pendingOperation) fail('OPERATION_PENDING', '上次建卡或改名没有完成；不会重复执行');
-          if (!p.cardFile) return this.createNewCard(p);
+          if (!p.cardFile) {
+            const sameCard = allowOverwrite ? this.findSameNameCard(p) : null;
+            if (!sameCard) return this.createNewCard(p, { allowOverwrite });
+            this.writeBinding(p, { cardFile: sameCard, projectName: p.name, worldOverride: null, detached: false, paused: false, operation: null });
+            p = this.getProject(body.projectId);
+          }
           if (this.projects().some(o => !sameProjectPath(o.dir, p.dir) && targetOccupied(o, p.cardFile))) fail('ATTACH_CONFLICT', `「${p.cardFile}」已由其他工程连着；先断开那边`);
           this.writeBinding(p, { detached: false, paused: false });
           let fresh = this.getProject(p.id);
           this.disconnect(p.id);
+          const sameCard = this.findSameNameCard(fresh);
+          if (sameCard && (this.cardMissing(fresh) || fresh.name !== fresh.projectName || (allowOverwrite && fresh.cardFile.toLowerCase() !== sameCard.toLowerCase()))) {
+            if (fresh.name !== fresh.projectName) await this.adapter.syncRootName?.(fresh);
+            this.writeBinding(fresh, {
+              cardFile: sameCard,
+              projectName: fresh.name,
+              worldOverride: null,
+              detached: false,
+              paused: false,
+              operation: null,
+            });
+            this.state.activeCardFile = sameCard;
+            this.saveState();
+            fresh = this.getProject(fresh.id);
+          }
           this.followProject(fresh);
           this.record('connect', p.id, { cardFile: fresh.cardFile });
-          if (this.cardMissing(fresh)) return { project: this.publicProject(fresh), ...this.markReconnect(fresh, null, { onlyNew: true }) };
+          if (this.cardMissing(fresh)) {
+            if (allowOverwrite) return this.createNewCard(fresh, { allowOverwrite: true });
+            return { project: this.publicProject(fresh), ...this.markReconnect(fresh, null, { onlyNew: true }) };
+          }
           if (fresh.targetKind !== 'world' && fresh.name !== fresh.projectName) {
             const target = `${fresh.name}.png`;
             if (!this.adapter.listCards().some(c => c.cardFile.toLowerCase() === target.toLowerCase())) {
@@ -11913,6 +11975,11 @@ class SyncService {
               }
             }
           }
+          if (allowOverwrite) {
+            const result = await this.perform(fresh, { replaceRemote: true });
+            this.refreshWatchers(); this.wake([p.id]);
+            return { project: this.publicProject(this.getProject(p.id)), cardFile: fresh.cardFile, ...result };
+          }
           const diff = await this.engine.inspect(fresh);
           if (!diff.clean) return { project: this.publicProject(fresh), cardFile: fresh.cardFile, ...this.markReconnect(fresh, diff) };
           const result = await this.perform(fresh, { previewRevision: diff.revision });
@@ -11921,14 +11988,35 @@ class SyncService {
         }
         // 以本地为准覆盖：本地工程整个写进原来那张卡和它的世界书，断开期间酒馆里的改动不保留
         case 'reconnectOverwrite': {
-          let p = this.getProject(body.projectId);
+          let p = this.getProject(body.projectId, { attached: false });
           if (body.clearPending && p.pendingOperation) {
             this.adapter.clearPendingOperation?.(p);
             this.writeBinding(p, { operation: null });
             this.results.delete(p.id);
+            p = this.getProject(body.projectId, { attached: false });
+          }
+          const sameCard = this.findSameNameCard(p);
+          if (sameCard && (!p.cardFile || !this.cardExists(p.cardFile) || p.name !== p.projectName || (body.preferSameName && p.cardFile.toLowerCase() !== sameCard.toLowerCase()))) {
+            if (p.name !== p.projectName) await this.adapter.syncRootName?.(p);
+            this.writeBinding(p, {
+              cardFile: sameCard,
+              projectName: p.name,
+              worldOverride: null,
+              detached: false,
+              paused: false,
+              operation: null,
+            });
+            this.state.activeCardFile = sameCard;
+            this.saveState();
             p = this.getProject(body.projectId);
           }
-          if (p.targetKind !== 'world' && !this.cardExists(p.cardFile)) fail('CARD_MISSING', `原来连的「${p.cardFile}」已不在酒馆里；只能「新建卡」`, 409, { missingCardFile: p.cardFile });
+          if (p.targetKind !== 'world' && (!p.cardFile || !this.cardExists(p.cardFile))) {
+            if (body.allowCreateIfMissing && typeof this.adapter.createCard === 'function') {
+              return this.createNewCard(p, { allowOverwrite: true });
+            }
+            if (!p.attached) fail('NOT_ATTACHED', '工程还没连到酒馆；先点「连接」');
+            fail('CARD_MISSING', `原来连的「${p.cardFile}」已不在酒馆里；只能「新建卡」`, 409, { missingCardFile: p.cardFile });
+          }
           this.writeBinding(p, { detached: false, paused: false });
           let targetProj = this.getProject(p.id);
           if (targetProj.targetKind !== 'world' && targetProj.name !== targetProj.projectName) {
@@ -12365,8 +12453,9 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     // 同步酒馆中所有角色卡的文件存在性；对当前打开的卡与目标卡按需拉取真实 PNG 字节
     const activeAvatars = new Set([currentAvatar, ...extraCards].filter(Boolean));
     if (service) {
-      for (const p of service.projects()) {
+      for (const p of [...service.projects(), ...service.assembleProjects()]) {
         if (p.cardFile && !p.cardFile.startsWith('world:')) activeAvatars.add(p.cardFile);
+        if (p.name) activeAvatars.add(`${p.name}.png`);
       }
     }
     const existingSet = new Set([...characters.map(c => c.avatar), ...extraCards].filter(Boolean));
@@ -12421,9 +12510,17 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
 
     if (service) {
-      for (const p of service.projects()) {
+      for (const p of [...service.projects(), ...service.assembleProjects()]) {
         if (p.cardFile?.startsWith('world:')) wantedWorlds.add(p.cardFile.slice(6).trim());
         if (p.binding?.worldOverride) wantedWorlds.add(String(p.binding.worldOverride).trim());
+        if (p.name) wantedWorlds.add(String(p.name).trim());
+        try {
+          const cardMd = __vfsRead(`/workspace/${p.id}/card.md`, 'utf8');
+          for (const m of cardMd.matchAll(/^\s*(?:world|world_book_name)\s*:\s*(.+?)\s*$/gm)) {
+            const val = m[1].replace(/^['"]|['"]$/g, '').trim();
+            if (val && val !== 'null' && val !== '~') wantedWorlds.add(val);
+          }
+        } catch {}
       }
     }
 
@@ -12558,6 +12655,10 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       if (job.op === 'create') {
         report = await mutations.create(job);
         const createdAvatar = report?.avatar || job.avatar;
+        if (report?.created === false) {
+          await syncTavernToVfs([createdAvatar].filter(Boolean), [job.worldName].filter(Boolean), { force: true });
+          return report;
+        }
         if (createdAvatar && job.pngBase64) {
           __vfsEnsureDir('/tavern/default-user/characters', false);
           __vfsFiles.set(`/tavern/default-user/characters/${createdAvatar}`, {
@@ -12705,8 +12806,8 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         await authorizeWorkspace({ pickNew: state.reason === 'no_folder' });
       }
       await pullDiskToVfs();
-      const extraCards = [args.cardFile].filter(Boolean);
-      const extraWorlds = [args.worldName].filter(Boolean);
+      const extraCards = [args.cardFile, args.projectId ? `${args.projectId}.png` : null].filter(Boolean);
+      const extraWorlds = [args.worldName, args.projectId].filter(Boolean);
       await syncTavernToVfs(extraCards, extraWorlds, { force: true });
       const svc = await ensureService();
       let res;

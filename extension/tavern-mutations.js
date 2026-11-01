@@ -39,20 +39,22 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
     }
     async function assertExpected(job, { worldOnly = false } = {}) {
         if (!job.expected) throw new Error('任务缺少预览校验信息；已拒绝写入，请更新同步后台。');
-        if (!worldOnly) {
-            const bytes = await readCardBytes(job.avatar);
-            const actual = bytes === null ? null : await sha256Hex(bytes);
-            if (actual !== job.expected.card) throw new Error('角色卡在预览后发生变化，已拒绝写入。请重新查看差异。');
+        if (!job.replaceRemote) {
+            if (!worldOnly) {
+                const bytes = await readCardBytes(job.avatar);
+                const actual = bytes === null ? null : await sha256Hex(bytes);
+                if (actual !== job.expected.card) throw new Error('角色卡在预览后发生变化，已拒绝写入。请重新查看差异。');
+            }
+            const diskWorld = await readWorld(job.expected.worldName);
+            const actualWorld = await worldDigest(diskWorld);
+            if (actualWorld !== job.expected.world) throw new Error('世界书在预览后发生变化，已拒绝写入。请重新查看差异。');
+            if (diskWorld !== null) {
+                const actualName = (await resolveWorldName(job.expected.worldName)) ?? job.expected.worldName;
+                const workingWorld = await getContext().loadWorldInfo(actualName);
+                if (await worldDigest(workingWorld) !== actualWorld) throw new Error('世界书有未保存编辑或缓存与磁盘不一致；先保存或刷新酒馆，再重新查看差异。');
+            }
         }
-        const diskWorld = await readWorld(job.expected.worldName);
-        const actualWorld = await worldDigest(diskWorld);
-        if (actualWorld !== job.expected.world) throw new Error('世界书在预览后发生变化，已拒绝写入。请重新查看差异。');
-        if (diskWorld !== null) {
-            const actualName = (await resolveWorldName(job.expected.worldName)) ?? job.expected.worldName;
-            const workingWorld = await getContext().loadWorldInfo(actualName);
-            if (await worldDigest(workingWorld) !== actualWorld) throw new Error('世界书有未保存编辑或缓存与磁盘不一致；先保存或刷新酒馆，再重新查看差异。');
-        }
-        if (job.expected.targetWorld) {
+        if (job.expected.targetWorld && !job.allowTargetWorldOverwrite && !job.replaceRemote) {
             const target = job.expected.targetWorld;
             if (await worldDigest(await readWorld(target.name)) !== target.hash) throw new Error('待创建的世界书名称已被占用，已拒绝写入。');
         }
@@ -95,7 +97,7 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
     if (name && (book?.entries || name !== job.expected?.worldName)) {
       // Card and world are separate upstream operations. If this fails after
       // the card write, the service reports the error and the card waits for reconnect.
-      if (job.expected?.worldName) {
+      if (job.expected?.worldName && !job.replaceRemote && !job.allowTargetWorldOverwrite) {
         const actual = await worldDigest(await readWorld(job.expected.worldName));
         if (actual !== job.expected.world) throw new Error('角色卡已写入，但世界书发生并发变化；已停止后续写入。请重新连接。');
       }
@@ -123,20 +125,28 @@ export function createTavernMutations({ getContext, fetchImpl = (...args) => fet
     async function create(job) {
         const st = getContext();
         await st.getCharacters();
-        if (getContext().characters.some(card => card.avatar.toLowerCase() === job.avatar.toLowerCase())) throw new Error(`酒馆里已经有「${job.avatar}」，没有覆盖。`);
-        if (job.worldName && await readWorld(job.worldName) !== null) throw new Error(`酒馆里已经有世界书「${job.worldName}」，没有覆盖。`);
-        const bytes = Uint8Array.from(atob(job.pngBase64), c => c.charCodeAt(0));
-        const form = new FormData();
-        form.append('avatar', new Blob([bytes], { type: 'image/png' }), job.avatar);
-        form.append('file_type', 'png');
-        if (job.preserveFileName) form.append('preserved_name', job.avatar);
-        const headers = new Headers(getContext().getRequestHeaders());
-        headers.delete('Content-Type');
-        const response = await fetchImpl('/api/characters/import', { method: 'POST', headers, body: form });
-        if (!response.ok) throw new Error(`建卡失败：HTTP ${response.status} ${(await response.text()).slice(0, 300)}`);
-        const imported = await response.json();
-        const avatar = imported.character?.avatar ?? `${imported.file_name}.png`;
-        const report = { id: job.id, avatar, created: true };
+        const existing = getContext().characters.find(card => card.avatar.toLowerCase() === job.avatar.toLowerCase());
+        if (!job.allowOverwrite) {
+            if (existing) throw new Error(`酒馆里已经有「${job.avatar}」，没有覆盖。`);
+            if (job.worldName && await readWorld(job.worldName) !== null) throw new Error(`酒馆里已经有世界书「${job.worldName}」，没有覆盖。`);
+        }
+        let avatar = existing?.avatar ?? job.avatar;
+        if (existing && job.card) {
+            await request('/api/characters/merge-attributes', { ...job.card, avatar });
+        } else {
+            const bytes = Uint8Array.from(atob(job.pngBase64), c => c.charCodeAt(0));
+            const form = new FormData();
+            form.append('avatar', new Blob([bytes], { type: 'image/png' }), job.avatar);
+            form.append('file_type', 'png');
+            if (job.preserveFileName) form.append('preserved_name', job.avatar);
+            const headers = new Headers(getContext().getRequestHeaders());
+            headers.delete('Content-Type');
+            const response = await fetchImpl('/api/characters/import', { method: 'POST', headers, body: form });
+            if (!response.ok) throw new Error(`建卡失败：HTTP ${response.status} ${(await response.text()).slice(0, 300)}`);
+            const imported = await response.json();
+            avatar = imported.character?.avatar ?? `${imported.file_name}.png`;
+        }
+        const report = { id: job.id, avatar, created: !existing };
         if (job.worldName) {
             report.world = await syncWorld(job.worldName, job.book ?? { entries: [] });
             // TauriTavern 在 import 时如果采用内嵌世界书，可能按卡名把 extensions.world 改成卡名；这里显式对齐回目标世界书名

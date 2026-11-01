@@ -782,8 +782,9 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     // 同步酒馆中所有角色卡的文件存在性；对当前打开的卡与目标卡按需拉取真实 PNG 字节
     const activeAvatars = new Set([currentAvatar, ...extraCards].filter(Boolean));
     if (service) {
-      for (const p of service.projects()) {
+      for (const p of [...service.projects(), ...service.assembleProjects()]) {
         if (p.cardFile && !p.cardFile.startsWith('world:')) activeAvatars.add(p.cardFile);
+        if (p.name) activeAvatars.add(\`\${p.name}.png\`);
       }
     }
     const existingSet = new Set([...characters.map(c => c.avatar), ...extraCards].filter(Boolean));
@@ -838,9 +839,17 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
 
     if (service) {
-      for (const p of service.projects()) {
+      for (const p of [...service.projects(), ...service.assembleProjects()]) {
         if (p.cardFile?.startsWith('world:')) wantedWorlds.add(p.cardFile.slice(6).trim());
         if (p.binding?.worldOverride) wantedWorlds.add(String(p.binding.worldOverride).trim());
+        if (p.name) wantedWorlds.add(String(p.name).trim());
+        try {
+          const cardMd = __vfsRead(\`/workspace/\${p.id}/card.md\`, 'utf8');
+          for (const m of cardMd.matchAll(/^\\s*(?:world|world_book_name)\\s*:\\s*(.+?)\\s*$/gm)) {
+            const val = m[1].replace(/^['"]|['"]$/g, '').trim();
+            if (val && val !== 'null' && val !== '~') wantedWorlds.add(val);
+          }
+        } catch {}
       }
     }
 
@@ -975,6 +984,10 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
       if (job.op === 'create') {
         report = await mutations.create(job);
         const createdAvatar = report?.avatar || job.avatar;
+        if (report?.created === false) {
+          await syncTavernToVfs([createdAvatar].filter(Boolean), [job.worldName].filter(Boolean), { force: true });
+          return report;
+        }
         if (createdAvatar && job.pngBase64) {
           __vfsEnsureDir('/tavern/default-user/characters', false);
           __vfsFiles.set(\`/tavern/default-user/characters/\${createdAvatar}\`, {
@@ -1122,8 +1135,8 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         await authorizeWorkspace({ pickNew: state.reason === 'no_folder' });
       }
       await pullDiskToVfs();
-      const extraCards = [args.cardFile].filter(Boolean);
-      const extraWorlds = [args.worldName].filter(Boolean);
+      const extraCards = [args.cardFile, args.projectId ? \`\${args.projectId}.png\` : null].filter(Boolean);
+      const extraWorlds = [args.worldName, args.projectId].filter(Boolean);
       await syncTavernToVfs(extraCards, extraWorlds, { force: true });
       const svc = await ensureService();
       let res;

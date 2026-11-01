@@ -378,7 +378,7 @@ export class FileSyncAdapter {
       planned[rel] = text;
     }
   }
-  async push(project, snapshot) {
+  async push(project, snapshot, { replaceRemote = false } = {}) {
     const worldOnly = project.cardFile.startsWith('world:');
     const card = worldOnly ? null : structuredClone(snapshot.card);
     if (card) {
@@ -391,7 +391,12 @@ export class FileSyncAdapter {
       if (had('regex:') && !has('regex:')) x.regex_scripts = [];
       if (had('script:') && !has('script:')) (x.tavern_helper ??= {}).scripts = [];
     }
-    const job = { id: crypto.randomUUID(), expected: snapshot.expected, ...(worldOnly ? { worldName: project.cardFile.slice(6), book: snapshot.card.data.character_book ?? { entries: [] } } : { avatar: project.cardFile, card }) };
+    const job = {
+      id: crypto.randomUUID(),
+      expected: snapshot.expected,
+      ...(replaceRemote ? { replaceRemote: true, allowTargetWorldOverwrite: true } : {}),
+      ...(worldOnly ? { worldName: project.cardFile.slice(6), book: snapshot.card.data.character_book ?? { entries: [] } } : { avatar: project.cardFile, card }),
+    };
     const result = await this.send(project, job, snapshot);
     if (!result || result.fatal) fail('TRANSPORT_FAILED', result?.fatal ?? '酒馆未确认写入', 502);
     return result;
@@ -486,12 +491,15 @@ export class FileSyncAdapter {
   }
   // 新建卡（作者决定 2026-10-27）：按本地工程新建一张卡和一本世界书。卡文件名和世界书名重名时都起新名字，
   // 新卡不连酒馆里已有的同名世界书。只算名字，不写任何东西
-  async planNewCard(project) {
+  async planNewCard(project, { allowOverwrite = false } = {}) {
     const libs = await this.libraries();
     const scan = await this.scanLocal(project, libs);
     const built = this.assembleCard(scan, libs.build, null);
     const configured = built.card.data?.extensions?.world || null;
     const desiredWorld = configured || (built.bookCount > 0 ? (built.card.data?.character_book?.name || project.name) : null);
+    if (allowOverwrite) {
+      return { cardFile: `${project.name}.png`, worldName: desiredWorld, worldOverride: null, allowOverwrite: true };
+    }
     const free = (base, taken) => { for (let i = 1; ; i++) { const name = i === 1 ? base : `${base} ${i}`; if (!taken.has(name.toLowerCase())) return name; } };
     const cards = new Set(this.listCards().map(c => c.name.toLowerCase()));
     const worlds = new Set(this.listWorlds().map(w => w.worldName.toLowerCase()));
@@ -515,12 +523,33 @@ export class FileSyncAdapter {
     const card = this.assembleCard(scan, libs.build, plan.worldName, path.basename(plan.cardFile, '.png')).card;
     const pngBase64 = libs.png.embedChara(this.coverOf(project), card).toString('base64');
     const book = card.data?.character_book ?? { entries: [] };
-    const result = await this.send(project, { id: jobId, op: 'create', avatar: plan.cardFile, pngBase64, worldName: plan.worldName, book });
+    const result = await this.send(project, {
+      id: jobId,
+      op: 'create',
+      avatar: plan.cardFile,
+      pngBase64,
+      worldName: plan.worldName,
+      book,
+      ...(plan.allowOverwrite ? { allowOverwrite: true, card } : {}),
+    });
     if (!result || result.fatal) fail('CREATE_FAILED', result?.fatal ?? '酒馆没有确认建卡', 502);
     if (result.avatar !== plan.cardFile) fail('CREATE_MISMATCH', `酒馆建卡后返回的文件名是 ${result.avatar}，不是 ${plan.cardFile}；需要核实`);
     return { cardFile: result.avatar, worldName: plan.worldName };
   }
   hasPendingOperation(project) { return fs.existsSync(this.operationFile(project)); }
+  async syncRootName(project) {
+    const libs = await this.libraries();
+    const scan = await this.scanLocal(project, libs);
+    const cardFm = scan.nodes.find(n => n.type === 'card')?.frontmatter ?? {};
+    const pairs = [[['name'], project.name]];
+    if (cardFm.world === project.projectName) pairs.push([['world'], project.name]);
+    if (cardFm.world_book_name === project.projectName) pairs.push([['world_book_name'], project.name]);
+    if (cardFm?.tavern?.data?.extensions?.world === project.projectName) pairs.push([['tavern', 'data', 'extensions', 'world'], project.name]);
+    if (cardFm?.tavern?.data?.character_book?.name === project.projectName) pairs.push([['tavern', 'data', 'character_book', 'name'], project.name]);
+    await this.setRoot(project, pairs);
+    const file = contained(project.dir, '.card-forge/tavern-sync.json'), baseline = readJson(file);
+    if (baseline?.cardFile === project.cardFile) atomicJson(file, { ...baseline, cardFile: `${project.name}.png` });
+  }
   async rename(project, jobId) {
     const snapshot = await this.snapshot(project);
     const cardFm = snapshot.nodes?.card?.frontmatter ?? {};
@@ -543,6 +572,7 @@ export class FileSyncAdapter {
       ...(targetWorld ? { worldName: targetWorld, book } : {}),
       expected: snapshot.expected,
       expectedTargetAbsent: true,
+      allowTargetWorldOverwrite: true,
     }, snapshot);
     if (!result || result.fatal) fail('RENAME_FAILED', result?.fatal ?? '酒馆未确认改名', 502);
     segment(result.avatar, '返回的卡文件名');

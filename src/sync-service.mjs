@@ -63,6 +63,14 @@ export class SyncService {
   cardMissing(p) {
     return p.attached && p.targetKind !== 'world' && !p.pendingOperation && !this.cardExists(p.cardFile);
   }
+  findSameNameCard(p) {
+    if (!p || p.targetKind === 'world' || !p.name || typeof this.adapter.listCards !== 'function') return null;
+    const wanted = `${p.name}.png`.toLowerCase();
+    const found = this.adapter.listCards().find(c => c.cardFile.toLowerCase() === wanted);
+    if (!found) return null;
+    const occupied = this.projects().some(o => !sameProjectPath(o.dir, p.dir) && targetOccupied(o, found.cardFile));
+    return occupied ? null : found.cardFile;
+  }
   decorateProject(p) {
     const result = this.results.get(p.id) ?? null;
     const missing = this.cardMissing(p);
@@ -224,10 +232,10 @@ export class SyncService {
     return { results };
   }
   // 新建卡：按本地工程新建一张卡和一本世界书（重名都起新名字，不连旧的同名世界书），之后连到新卡。旧卡留在酒馆里
-  async createNewCard(p) {
+  async createNewCard(p, { allowOverwrite = false } = {}) {
     if (p.targetKind === 'world') fail('INVALID_ACTION', '独立世界书工程不能新建角色卡', 400);
     if (p.pendingOperation) fail('OPERATION_PENDING', '上次建卡或改名没有完成；不会重复执行');
-    const plan = await this.adapter.planNewCard(p);
+    const plan = await this.adapter.planNewCard(p, { allowOverwrite });
     const id = crypto.randomUUID();
     this.disconnect(p.id);
     this.writeBinding(p, { operation: { id, kind: 'create', targetCardFile: plan.cardFile } });
@@ -303,6 +311,7 @@ export class SyncService {
         // 连接（作者决定 2026-10-27：只能从本地工程连到酒馆）：
         //   没连过（或原来那张卡已不在）→ 新建卡；连过 → 两边一致直接连上，不一致停下等作者选
         case 'connect': {
+          const allowOverwrite = Boolean(body.overwrite);
           let p = this.getProject(body.projectId, { attached: false });
           if (body.clearPending && p.pendingOperation) {
             this.adapter.clearPendingOperation?.(p);
@@ -311,14 +320,37 @@ export class SyncService {
             p = this.getProject(body.projectId, { attached: false });
           }
           if (p.pendingOperation) fail('OPERATION_PENDING', '上次建卡或改名没有完成；不会重复执行');
-          if (!p.cardFile) return this.createNewCard(p);
+          if (!p.cardFile) {
+            const sameCard = allowOverwrite ? this.findSameNameCard(p) : null;
+            if (!sameCard) return this.createNewCard(p, { allowOverwrite });
+            this.writeBinding(p, { cardFile: sameCard, projectName: p.name, worldOverride: null, detached: false, paused: false, operation: null });
+            p = this.getProject(body.projectId);
+          }
           if (this.projects().some(o => !sameProjectPath(o.dir, p.dir) && targetOccupied(o, p.cardFile))) fail('ATTACH_CONFLICT', `「${p.cardFile}」已由其他工程连着；先断开那边`);
           this.writeBinding(p, { detached: false, paused: false });
           let fresh = this.getProject(p.id);
           this.disconnect(p.id);
+          const sameCard = this.findSameNameCard(fresh);
+          if (sameCard && (this.cardMissing(fresh) || fresh.name !== fresh.projectName || (allowOverwrite && fresh.cardFile.toLowerCase() !== sameCard.toLowerCase()))) {
+            if (fresh.name !== fresh.projectName) await this.adapter.syncRootName?.(fresh);
+            this.writeBinding(fresh, {
+              cardFile: sameCard,
+              projectName: fresh.name,
+              worldOverride: null,
+              detached: false,
+              paused: false,
+              operation: null,
+            });
+            this.state.activeCardFile = sameCard;
+            this.saveState();
+            fresh = this.getProject(fresh.id);
+          }
           this.followProject(fresh);
           this.record('connect', p.id, { cardFile: fresh.cardFile });
-          if (this.cardMissing(fresh)) return { project: this.publicProject(fresh), ...this.markReconnect(fresh, null, { onlyNew: true }) };
+          if (this.cardMissing(fresh)) {
+            if (allowOverwrite) return this.createNewCard(fresh, { allowOverwrite: true });
+            return { project: this.publicProject(fresh), ...this.markReconnect(fresh, null, { onlyNew: true }) };
+          }
           if (fresh.targetKind !== 'world' && fresh.name !== fresh.projectName) {
             const target = `${fresh.name}.png`;
             if (!this.adapter.listCards().some(c => c.cardFile.toLowerCase() === target.toLowerCase())) {
@@ -344,6 +376,11 @@ export class SyncService {
               }
             }
           }
+          if (allowOverwrite) {
+            const result = await this.perform(fresh, { replaceRemote: true });
+            this.refreshWatchers(); this.wake([p.id]);
+            return { project: this.publicProject(this.getProject(p.id)), cardFile: fresh.cardFile, ...result };
+          }
           const diff = await this.engine.inspect(fresh);
           if (!diff.clean) return { project: this.publicProject(fresh), cardFile: fresh.cardFile, ...this.markReconnect(fresh, diff) };
           const result = await this.perform(fresh, { previewRevision: diff.revision });
@@ -352,14 +389,35 @@ export class SyncService {
         }
         // 以本地为准覆盖：本地工程整个写进原来那张卡和它的世界书，断开期间酒馆里的改动不保留
         case 'reconnectOverwrite': {
-          let p = this.getProject(body.projectId);
+          let p = this.getProject(body.projectId, { attached: false });
           if (body.clearPending && p.pendingOperation) {
             this.adapter.clearPendingOperation?.(p);
             this.writeBinding(p, { operation: null });
             this.results.delete(p.id);
+            p = this.getProject(body.projectId, { attached: false });
+          }
+          const sameCard = this.findSameNameCard(p);
+          if (sameCard && (!p.cardFile || !this.cardExists(p.cardFile) || p.name !== p.projectName || (body.preferSameName && p.cardFile.toLowerCase() !== sameCard.toLowerCase()))) {
+            if (p.name !== p.projectName) await this.adapter.syncRootName?.(p);
+            this.writeBinding(p, {
+              cardFile: sameCard,
+              projectName: p.name,
+              worldOverride: null,
+              detached: false,
+              paused: false,
+              operation: null,
+            });
+            this.state.activeCardFile = sameCard;
+            this.saveState();
             p = this.getProject(body.projectId);
           }
-          if (p.targetKind !== 'world' && !this.cardExists(p.cardFile)) fail('CARD_MISSING', `原来连的「${p.cardFile}」已不在酒馆里；只能「新建卡」`, 409, { missingCardFile: p.cardFile });
+          if (p.targetKind !== 'world' && (!p.cardFile || !this.cardExists(p.cardFile))) {
+            if (body.allowCreateIfMissing && typeof this.adapter.createCard === 'function') {
+              return this.createNewCard(p, { allowOverwrite: true });
+            }
+            if (!p.attached) fail('NOT_ATTACHED', '工程还没连到酒馆；先点「连接」');
+            fail('CARD_MISSING', `原来连的「${p.cardFile}」已不在酒馆里；只能「新建卡」`, 409, { missingCardFile: p.cardFile });
+          }
           this.writeBinding(p, { detached: false, paused: false });
           let targetProj = this.getProject(p.id);
           if (targetProj.targetKind !== 'world' && targetProj.name !== targetProj.projectName) {

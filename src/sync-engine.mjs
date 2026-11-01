@@ -95,7 +95,7 @@ export class SyncEngine {
       const prepared = await this.adapter.snapshot(project);
       if ((plannedLocal ? prepared.localHash !== plannedLocal : nodeSignature(prepared) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(prepared) !== plannedNodes)) fail('STALE_LOCAL', '决定后本地文件又改变；没有推送未经预览的内容');
       if (JSON.stringify(prepared.expected) !== JSON.stringify(before.expected)) fail('STALE_REMOTE', '酒馆内容已改变；未推送');
-      await this.adapter.push(project, prepared);
+      await this.adapter.push(project, prepared, { replaceRemote });
     }
     const after = await this.adapter.snapshot(project);
     if ((plannedLocal ? after.localHash !== plannedLocal : nodeSignature(after) !== plannedNodes) || (!hasMetaUpdates && nodeSignature(after) !== plannedNodes)) fail('STALE_LOCAL', '操作期间工程改变；没有更新同步基线');
