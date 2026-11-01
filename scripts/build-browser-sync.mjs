@@ -81,13 +81,73 @@ function bundleDirectoryEsm(entryFile) {
   return `${order.join('\n')}\nconst YAML = ${rootId}.default ?? ${rootId};\n`;
 }
 
+const MODULE_VAR_BY_PATH = {
+  'src/safety.mjs': '__mod_safety',
+  'src/forge/lib/png.mjs': '__mod_forge_png',
+  'src/png.mjs': '__mod_bridge_png',
+  'src/forge/lib/fingerprint.mjs': '__mod_fp',
+  'src/forge/lib/extras.mjs': '__mod_extras',
+  'src/forge/lib/nodes.mjs': '__mod_nodes',
+  'src/forge/lib/protocol.mjs': '__mod_protocol',
+  'src/forge/cmd/build.mjs': '__mod_build',
+  'src/forge/cmd/unpack.mjs': '__mod_unpack',
+  'src/slots.mjs': '__mod_slots',
+  'src/projects.mjs': '__mod_projects',
+  'src/world-entry-ids.mjs': '__mod_world_ids',
+  'src/sync-engine.mjs': '__mod_sync_engine',
+  'src/file-sync-adapter.mjs': '__mod_adapter',
+  'src/sync-service.mjs': '__mod_service',
+};
+const SHIMMED_BARE_IMPORTS = new Set(['node:fs', 'node:path', 'node:crypto', 'node:zlib', 'node:url', 'yaml']);
+const SHIMMED_LOCAL_MODULES = {
+  'extension/protocol.js': `const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;\nconst canonicalJson = value => JSON.stringify(stable(value ?? {}));`,
+  'src/paths.mjs': `const tavernUserDir = () => '/tavern/default-user';\nconst tavernCharDir = () => '/tavern/default-user/characters';`,
+  'src/connection.mjs': '',
+  'src/bridge.mjs': `const publishCardJob = async () => ({});\nconst getJobResult = async () => ({ pending: false });`,
+  'src/skills.mjs': `const inspectSkillsAndAgents = async () => ({ available: false, skills: [], missingNames: [], leftovers: [], agentPrompt: { exists: false }, summary: '当前为浏览器本地文件夹直连模式，已内置完整拆卡、装卡与实时同步，无需安装额外技能。' });\nconst deploySkillsAndAgents = async () => ({ available: false, summary: '当前为浏览器本地文件夹直连模式，无需部署外部技能。' });`,
+};
+const moduleExportsByVar = new Map();
+
 function wrapModule(varName, relPath, replacements = []) {
   let code = fs.readFileSync(path.join(ROOT, relPath), 'utf8').replace(/\r\n/g, '\n');
   for (const [pattern, replacement] of replacements) {
     code = code.replace(pattern, replacement);
   }
-  // Remove remaining import lines
-  code = code.replace(/^import\s+[\s\S]*?from\s+['"][^'"]+['"];?\s*$/gm, '');
+  // 自动将源码中的 import 转换为对应模块绑定或顶层 shim，禁止手工维护重复符号表或静默丢弃未知 import
+  code = code.replace(/^import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"];?[ \t]*$/gm, (full, clauseRaw, spec) => {
+    const clause = clauseRaw.replace(/\s+/g, ' ').trim();
+    if (spec === 'node:fs/promises') {
+      return `const ${clause} = fsp;`;
+    }
+    if (spec === 'node:child_process') {
+      return `const execFileSync = () => 'RESULT : PASS';`;
+    }
+    if (SHIMMED_BARE_IMPORTS.has(spec)) {
+      return '';
+    }
+    if (spec.startsWith('.')) {
+      const targetRel = path.relative(ROOT, path.resolve(path.dirname(path.join(ROOT, relPath)), spec)).replace(/\\/g, '/');
+      if (Object.hasOwn(SHIMMED_LOCAL_MODULES, targetRel)) {
+        return SHIMMED_LOCAL_MODULES[targetRel];
+      }
+      const targetVar = MODULE_VAR_BY_PATH[targetRel];
+      if (!targetVar) {
+        throw new Error(`[build-browser-sync] 模块 ${relPath} 导入了未注册的本地模块 ${spec} (${targetRel})`);
+      }
+      const brace = clause.match(/^\{([^}]+)\}$/);
+      if (brace) {
+        const mapped = brace[1].split(',').map(s => s.trim()).filter(Boolean).map(s => {
+          const m = s.match(/^([A-Za-z0-9_$]+)\s+as\s+([A-Za-z0-9_$]+)$/);
+          return m ? `${m[1]}: ${m[2]}` : s;
+        }).join(', ');
+        return `const { ${mapped} } = ${targetVar};`;
+      }
+      if (/^[A-Za-z0-9_$]+$/.test(clause)) {
+        return `const ${clause} = ${targetVar}.default ?? ${targetVar};`;
+      }
+    }
+    throw new Error(`[build-browser-sync] 模块 ${relPath} 含有未处理的 import 语句: ${full.trim()}`);
+  });
   const exportsList = [];
   code = code.replace(/export\s+\{([^}]+)\};?/g, (_, spec) => {
     for (const part of spec.split(',').map(s => s.trim()).filter(Boolean)) {
@@ -105,7 +165,9 @@ function wrapModule(varName, relPath, replacements = []) {
     exportsList.push(name);
     return `${kw} ${name}`;
   });
-  return `const ${varName} = (() => {\n${code}\nreturn { ${[...new Set(exportsList)].join(', ')} };\n})();`;
+  const uniqueExports = [...new Set(exportsList)];
+  moduleExportsByVar.set(varName, new Set(uniqueExports.map(e => e.split(':')[0].trim())));
+  return `const ${varName} = (() => {\n${code}\nreturn { ${uniqueExports.join(', ')} };\n})();`;
 }
 
 const yamlBundle = bundleDirectoryEsm(path.join(ROOT, 'node_modules/yaml/browser/dist/index.js'));
@@ -491,82 +553,32 @@ const BRIDGE_ROOT = '/';
 const process = { pid: 1, env: {}, platform: 'browser' };
 `;
 
-const mSafety = wrapModule('__mod_safety', 'src/safety.mjs', [
-  [/import \{ stable, canonicalJson \} from '\.\.\/extension\/protocol\.js';/, `const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
-const canonicalJson = value => JSON.stringify(stable(value ?? {}));`],
-]);
+const mSafety = wrapModule('__mod_safety', 'src/safety.mjs');
 const mForgePng = wrapModule('__mod_forge_png', 'src/forge/lib/png.mjs');
 const mBridgePng = wrapModule('__mod_bridge_png', 'src/png.mjs');
-const mFp = wrapModule('__mod_fp', 'src/forge/lib/fingerprint.mjs', [
-  [/import fs from 'node:fs\/promises';/, 'const fs = fsp;'],
-]);
-const mExtras = wrapModule('__mod_extras', 'src/forge/lib/extras.mjs', [
-  [/import fs from 'node:fs\/promises';/, 'const fs = fsp;'],
-]);
-const mNodes = wrapModule('__mod_nodes', 'src/forge/lib/nodes.mjs', [
-  [/import fs from 'node:fs\/promises';/, 'const fs = fsp;\nconst { readExtras } = __mod_extras;'],
-]);
-const mProtocol = wrapModule('__mod_protocol', 'src/forge/lib/protocol.mjs', [
-  [/import \{ isKnownType[\s\S]*?from '\.\/nodes\.mjs';/, 'const { isKnownType, KNOWN_TYPE_LIST, parsePosition, defaultTarget, bookNodesOf, assignOrders, orderGroupOf } = __mod_nodes;'],
-]);
+const mFp = wrapModule('__mod_fp', 'src/forge/lib/fingerprint.mjs');
+const mExtras = wrapModule('__mod_extras', 'src/forge/lib/extras.mjs');
+const mNodes = wrapModule('__mod_nodes', 'src/forge/lib/nodes.mjs');
+const mProtocol = wrapModule('__mod_protocol', 'src/forge/lib/protocol.mjs');
 const mBuild = wrapModule('__mod_build', 'src/forge/cmd/build.mjs', [
-  [/import fs from 'node:fs\/promises';/, `const fs = fsp;
-const { scanCard, parsePosition, defaultTarget, assignOrders, bookNodesOf, quoteBarePosition } = __mod_nodes;
-const { validateNodes, formatReport } = __mod_protocol;
-const { sha256Hex, fnv1a } = __mod_fp;
-const { embedChara } = __mod_forge_png;
-const { applyExtras } = __mod_extras;
-const fileURLToPath = () => '/src/forge/cmd/build.mjs';
-const execFileSync = () => 'RESULT : PASS';`],
+  [/fileURLToPath\(import\.meta\.url\)/g, `'/src/forge/cmd/build.mjs'`],
   [/export \{ defaultTarget \};/, ''],
 ]);
-mBuild.concat; // keep
-const mUnpack = wrapModule('__mod_unpack', 'src/forge/cmd/unpack.mjs', [
-  [/import fs from 'node:fs\/promises';/, `const fs = fsp;
-const { extractChara } = __mod_forge_png;
-const { scanCard, BODY_MARK } = __mod_nodes;
-const { assemble, entryFromNode } = __mod_build;
-const { fnv1a } = __mod_fp;
-const { listExtras, defaultKeep, keptExtensions, extraFiles, extraBase } = __mod_extras;`],
-]);
+const mUnpack = wrapModule('__mod_unpack', 'src/forge/cmd/unpack.mjs');
 const mSlots = wrapModule('__mod_slots', 'src/slots.mjs', [
-  [/const ROOT =[\s\S]*?export const extrasLib = await forge\('lib\/extras\.mjs'\);/, `const { parseChunks } = __mod_bridge_png;
-const { contained, segment, readJson, atomicJson } = __mod_safety;
-const tavernUserDir = () => '/tavern/default-user';
-const tavernCharDir = () => '/tavern/default-user/characters';
-export const forge = async () => __mod_extras;
+  [/const ROOT =[\s\S]*?export const extrasLib = await forge\('lib\/extras\.mjs'\);/, `export const forge = async () => __mod_extras;
 export const extrasLib = __mod_extras;`],
 ]);
-const mWorldIds = wrapModule('__mod_world_ids', 'src/world-entry-ids.mjs', [
-  [/import \{[^}]*\} from '\.\/safety\.mjs';/, `const { fail, contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject } = __mod_safety;
-const { slotHash } = __mod_slots;`],
-]);
-const mSyncEngine = wrapModule('__mod_sync_engine', 'src/sync-engine.mjs', [
-  [/import \{ fail, hashObject \} from '\.\/safety\.mjs';/, `const { fail, hashObject } = __mod_safety;
-const { slotHash } = __mod_slots;`],
-]);
+const mWorldIds = wrapModule('__mod_world_ids', 'src/world-entry-ids.mjs');
+const mSyncEngine = wrapModule('__mod_sync_engine', 'src/sync-engine.mjs');
+const mProjects = wrapModule('__mod_projects', 'src/projects.mjs');
 const mAdapter = wrapModule('__mod_adapter', 'src/file-sync-adapter.mjs', [
-  [/import \{ BRIDGE_ROOT \} from '\.\/connection\.mjs';/, `const { tavernUserDir, tavernCharDir } = { tavernUserDir: () => '/tavern/default-user', tavernCharDir: () => '/tavern/default-user/characters' };
-const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, tryWorldFilePath, readCardPng, extraSlots, extraOrder, stableJson, extrasLib } = __mod_slots;
-const { publishCardJob, getJobResult } = { publishCardJob: async () => ({}), getJobResult: async () => ({ pending: false }) };
-const { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } = __mod_safety;
-const { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } = __mod_projects;
-const { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline } = __mod_world_ids;`],
   [/async libraries\(\) \{[\s\S]*?return this\.libs;\n  \}/, `async libraries() {
     return { nodes: __mod_nodes, fp: __mod_fp, build: { ...__mod_build, defaultTarget: __mod_nodes.defaultTarget }, protocol: __mod_protocol, unpack: __mod_unpack, YAML, png: __mod_forge_png };
   }`],
-  [/import \{ inspectSkillsAndAgents, deploySkillsAndAgents \} from '\.\/skills\.mjs';/, `const inspectSkillsAndAgents = async () => ({ available: false, skills: [], missingNames: [], leftovers: [], agentPrompt: { exists: false }, summary: '当前为浏览器本地文件夹直连模式，已内置完整拆卡、装卡与实时同步，无需安装额外技能。' });
-const deploySkillsAndAgents = async () => ({ available: false, summary: '当前为浏览器本地文件夹直连模式，无需部署外部技能。' });`],
   [/const \{ compareSnapshot \} = await import\('\.\/sync-engine\.mjs'\);/, 'const { compareSnapshot } = __mod_sync_engine;'],
 ]);
-const mProjects = wrapModule('__mod_projects', 'src/projects.mjs', [
-  [/import \{ contained, segment, readJson \} from '\.\/safety\.mjs';/, 'const { contained, segment, readJson } = __mod_safety;'],
-]);
-const mService = wrapModule('__mod_service', 'src/sync-service.mjs', [
-  [/import \{ discoverProjects, reservedTargets, targetOccupied, isSingleCardDirectory, sameProjectPath \} from '\.\/projects\.mjs';/, `const { discoverProjects, reservedTargets, targetOccupied, isSingleCardDirectory, sameProjectPath } = __mod_projects;
-const { SyncEngine } = __mod_sync_engine;
-const { SerialQueue, contained, segment, readJson, atomicJson, fail } = __mod_safety;`],
-]);
+const mService = wrapModule('__mod_service', 'src/sync-service.mjs');
 
 const browserRuntimeCode = `
 // IndexedDB 保存用户选择的本地工作区文件夹句柄 (FileSystemDirectoryHandle)
@@ -793,6 +805,11 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
 
     const wantedWorlds = new Set(extraWorlds.filter(Boolean));
+    for (const c of characters) {
+      if (!c.avatar || !activeAvatars.has(c.avatar)) continue;
+      const w = typeof c?.data?.extensions?.world === 'string' ? c.data.extensions.world.trim() : '';
+      if (w) wantedWorlds.add(w);
+    }
     const domWorld = globalThis.document?.querySelector?.('#world_editor_select option:checked')?.textContent?.trim();
     if (domWorld && !domWorld.startsWith('---')) wantedWorlds.add(domWorld);
 
@@ -811,7 +828,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           const buf = new BrowserBuffer(await res.arrayBuffer());
           __vfsFiles.set(vfsPath, { bytes: buf, mtimeMs: Date.now() });
           try {
-            const card = __mod_Slots.readCardPng(buf);
+            const card = __mod_slots.readCardPng(buf);
             const w = typeof card?.data?.extensions?.world === 'string' ? card.data.extensions.world.trim() : '';
             cardWorldCache.set(avatar, w);
             if (w) wantedWorlds.add(w);
@@ -890,6 +907,67 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
   }
 
+  function bookToWorldObj(book) {
+    const st = getContext?.();
+    if (typeof st?.convertCharacterBook === 'function') {
+      const converted = st.convertCharacterBook(structuredClone(book ?? { entries: [] }));
+      if (converted?.entries) {
+        return {
+          entries: converted.entries,
+          ...(book?.description ? { description: book.description } : {}),
+        };
+      }
+    }
+    const entries = Object.fromEntries(((book?.entries) ?? []).map((entry, index) => {
+      const uid = entry.id ?? index;
+      return [String(uid), {
+        uid,
+        key: entry.keys ?? [],
+        keysecondary: entry.secondary_keys ?? [],
+        comment: entry.comment ?? entry.name ?? '',
+        content: entry.content ?? '',
+        constant: Boolean(entry.constant),
+        selective: Boolean(entry.selective),
+        order: entry.insertion_order ?? 100,
+        position: entry.extensions?.position ?? (entry.position === 'after_char' ? 1 : 0),
+        excludeRecursion: entry.extensions?.exclude_recursion ?? false,
+        preventRecursion: entry.extensions?.prevent_recursion ?? false,
+        delayUntilRecursion: entry.extensions?.delay_until_recursion ?? false,
+        disable: entry.enabled === false,
+        addMemo: Boolean(entry.comment ?? entry.name),
+        displayIndex: entry.extensions?.display_index ?? index,
+        probability: entry.extensions?.probability ?? 100,
+        useProbability: entry.extensions?.useProbability ?? true,
+        depth: entry.extensions?.depth ?? 4,
+        selectiveLogic: entry.extensions?.selectiveLogic ?? 0,
+        outletName: entry.extensions?.outlet_name ?? '',
+        group: entry.extensions?.group ?? '',
+        groupOverride: entry.extensions?.group_override ?? false,
+        groupWeight: entry.extensions?.group_weight ?? 100,
+        scanDepth: entry.extensions?.scan_depth ?? null,
+        caseSensitive: entry.extensions?.case_sensitive ?? null,
+        matchWholeWords: entry.extensions?.match_whole_words ?? null,
+        useGroupScoring: entry.extensions?.use_group_scoring ?? null,
+        automationId: entry.extensions?.automation_id ?? '',
+        role: entry.extensions?.role ?? 0,
+        vectorized: entry.extensions?.vectorized ?? false,
+        sticky: entry.extensions?.sticky ?? null,
+        cooldown: entry.extensions?.cooldown ?? null,
+        delay: entry.extensions?.delay ?? null,
+        matchPersonaDescription: entry.extensions?.match_persona_description ?? false,
+        matchCharacterDescription: entry.extensions?.match_character_description ?? false,
+        matchCharacterPersonality: entry.extensions?.match_character_personality ?? false,
+        matchCharacterDepthPrompt: entry.extensions?.match_character_depth_prompt ?? false,
+        matchScenario: entry.extensions?.match_scenario ?? false,
+        matchCreatorNotes: entry.extensions?.match_creator_notes ?? false,
+        extensions: entry.extensions ?? {},
+        triggers: entry.extensions?.triggers ?? [],
+        ignoreBudget: entry.extensions?.ignore_budget ?? false,
+      }];
+    }));
+    return { entries, ...(book?.description ? { description: book.description } : {}) };
+  }
+
   async function ensureService() {
     if (service) return service;
     const transport = async job => {
@@ -907,20 +985,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         }
         if (job.worldName) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
-            ...(e.extensions ?? {}),
-            uid: e.id ?? i,
-            key: e.keys ?? [],
-            keysecondary: e.secondary_keys ?? [],
-            comment: e.comment ?? e.name ?? '',
-            content: e.content ?? '',
-            constant: Boolean(e.constant),
-            selective: Boolean(e.selective),
-            order: e.insertion_order ?? 100,
-            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
-            disable: e.enabled === false,
-          }]));
-          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          const worldObj = job.world?.entries ? job.world : bookToWorldObj(job.book);
           __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(worldObj, null, 2) + '\\n', 'utf8', false);
         }
         return report;
@@ -933,20 +998,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         }
         if (job.worldName && (job.book || job.world)) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
-            ...(e.extensions ?? {}),
-            uid: e.id ?? i,
-            key: e.keys ?? [],
-            keysecondary: e.secondary_keys ?? [],
-            comment: e.comment ?? e.name ?? '',
-            content: e.content ?? '',
-            constant: Boolean(e.constant),
-            selective: Boolean(e.selective),
-            order: e.insertion_order ?? 100,
-            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
-            disable: e.enabled === false,
-          }]));
-          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          const worldObj = job.world?.entries ? job.world : bookToWorldObj(job.book);
           __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(worldObj, null, 2) + '\\n', 'utf8', false);
         }
       }
@@ -1119,30 +1171,44 @@ const fullCode = [
   browserRuntimeCode,
 ].join('\n\n');
 
-// 构建期静态校验：确保所有被打包的本地模块 import 的符号均已在各自的 wrapModule 作用域中提供
-const WRAPPED_MODULES = [
-  ['src/forge/lib/protocol.mjs', mProtocol],
-  ['src/forge/cmd/build.mjs', mBuild],
-  ['src/forge/cmd/unpack.mjs', mUnpack],
-  ['src/slots.mjs', mSlots],
-  ['src/world-entry-ids.mjs', mWorldIds],
-  ['src/sync-engine.mjs', mSyncEngine],
-  ['src/file-sync-adapter.mjs', mAdapter],
-  ['src/projects.mjs', mProjects],
-  ['src/sync-service.mjs', mService],
-];
-for (const [relFile, wrappedCode] of WRAPPED_MODULES) {
-  const rawSrc = fs.readFileSync(path.join(ROOT, relFile), 'utf8');
-  for (const m of rawSrc.matchAll(/^import\s+\{([^}]+)\}\s+from\s+'(\.[^']+)';/gm)) {
-    const names = m[1].split(',').map(s => s.trim()).filter(Boolean);
-    for (const sym of names) {
-      if (sym === 'BRIDGE_ROOT') continue;
-      const declRegex = new RegExp(`\\b(const|let|var|function)\\s+[^;=]*\\b${sym}\\b`);
-      if (!declRegex.test(wrappedCode)) {
-        throw new Error(`[build-browser-sync] 模块 ${relFile} 从 ${m[2]} 导入的符号 "${sym}" 未在 wrapModule 中注入！`);
-      }
+// 构建期静态校验：
+// 1. 确保所有 __mod_* 引用都指向已注册模块（防止 __mod_Slots 等拼写错误）
+// 2. 确保所有从 __mod_* 解构或属性访问的符号都在目标模块的 return 导出集合中
+// 3. 确保被打包模块内没有残留未转换的 import 语句或 import.meta
+const validModVars = new Set(Object.values(MODULE_VAR_BY_PATH));
+for (const m of fullCode.matchAll(/\b(__mod_[A-Za-z0-9_]+)\b/g)) {
+  if (!validModVars.has(m[1])) {
+    throw new Error(`[build-browser-sync] 发现未定义的模块变量引用: ${m[1]}`);
+  }
+}
+for (const m of fullCode.matchAll(/const\s+\{([^}]+)\}\s*=\s*(__mod_[A-Za-z0-9_]+);/g)) {
+  const modVar = m[2];
+  const exported = moduleExportsByVar.get(modVar);
+  for (const part of m[1].split(',').map(s => s.trim()).filter(Boolean)) {
+    const srcSym = part.split(':')[0].trim();
+    if (!exported?.has(srcSym)) {
+      throw new Error(`[build-browser-sync] 模块变量 ${modVar} 未导出符号 "${srcSym}"`);
     }
   }
+}
+for (const m of fullCode.matchAll(/\b(__mod_[A-Za-z0-9_]+)\.([A-Za-z0-9_$]+)\b/g)) {
+  const [, modVar, prop] = m;
+  const exported = moduleExportsByVar.get(modVar);
+  if (!exported?.has(prop)) {
+    throw new Error(`[build-browser-sync] 模块变量 ${modVar} 未导出属性 "${prop}"`);
+  }
+}
+if (/\bimport\.meta\b/.test(fullCode)) {
+  throw new Error('[build-browser-sync] 打包产物中残留未替换的 import.meta');
+}
+const manifestVer = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8')).version;
+const indexCode = fs.readFileSync(path.join(ROOT, 'extension/index.js'), 'utf8');
+const settingsCode = fs.readFileSync(path.join(ROOT, 'extension/settings.js'), 'utf8');
+for (const m of indexCode.matchAll(/\?v=([0-9]+\.[0-9]+\.[0-9]+)/g)) {
+  if (m[1] !== manifestVer) throw new Error(`[build-browser-sync] extension/index.js 子模块版本号 ${m[1]} 与 manifest.json (${manifestVer}) 不一致`);
+}
+if (!settingsCode.includes(`v${manifestVer}`)) {
+  throw new Error(`[build-browser-sync] extension/settings.js 面板标题版本号未同步为 v${manifestVer}`);
 }
 
 const outPath = path.join(ROOT, 'extension', 'browser-sync.js');

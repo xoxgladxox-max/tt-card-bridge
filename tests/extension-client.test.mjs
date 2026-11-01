@@ -509,4 +509,32 @@ test('browser-sync runtime prompts user confirmation first, then unpacks and syn
     }
 });
 
+test('browser-sync bundle verifies all __mod_* bindings, forbids dangling import.meta, and keeps version strings aligned', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    const bundleCode = fs.readFileSync(path.join(root, 'extension/browser-sync.js'), 'utf8');
+    assert.equal(/\bimport\.meta\b/.test(bundleCode), false, 'bundle should not contain raw import.meta');
+    assert.equal(bundleCode.includes('__mod_Slots'), false, 'bundle must not contain misspelled __mod_Slots');
+    assert.equal(bundleCode.includes('__mod_slots.readCardPng'), true, 'bundle must use __mod_slots.readCardPng');
+
+    const definedMods = new Set();
+    for (const m of bundleCode.matchAll(/const (__mod_[A-Za-z0-9_]+)\s*=\s*await\s+\(async/g)) {
+        definedMods.add(m[1]);
+    }
+    for (const m of bundleCode.matchAll(/\b(__mod_[A-Za-z0-9_]+)\b/g)) {
+        assert.equal(definedMods.has(m[1]), true, `undefined module reference ${m[1]}`);
+    }
+
+    const manifestVer = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8')).version;
+    const indexCode = fs.readFileSync(path.join(root, 'extension/index.js'), 'utf8');
+    const settingsCode = fs.readFileSync(path.join(root, 'extension/settings.js'), 'utf8');
+    for (const m of indexCode.matchAll(/\?v=([0-9]+\.[0-9]+\.[0-9]+)/g)) {
+        assert.equal(m[1], manifestVer);
+    }
+    assert.equal(settingsCode.includes(`v${manifestVer}`), true);
+});
+
+
 

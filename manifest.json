@@ -6,6 +6,6 @@
   "js": "extension/index.js",
   "css": "extension/style.css",
   "author": "card-workspace",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "auto_update": true
 }

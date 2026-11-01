@@ -1,9 +1,9 @@
 // One authenticated loopback connection serves the settings panel and queued tasks.
 // 带上版本号查询参数，避免在酒馆点「更新扩展」后浏览器继续使用旧版子模块缓存
-import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.8';
-import { mountSettings } from './settings.js?v=0.3.8';
-import { createTavernMutations } from './tavern-mutations.js?v=0.3.8';
-import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.8';
+import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.9';
+import { mountSettings } from './settings.js?v=0.3.9';
+import { createTavernMutations } from './tavern-mutations.js?v=0.3.9';
+import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.9';
 
 const TAG = '[tt-card-bridge]';
 let known = null;
@@ -234,7 +234,7 @@ async function tick() {
     if (result.report) {
       const report = result.report;
       const failure = report.fatal || report.profileError || report.results?.find(item => item.error)?.error;
-      if (failure) { panel?.showError(failure); toastr.error(errText(failure), '卡工程同步'); }
+      if (failure) { panel?.showError(failure); globalThis.toastr?.error(errText(failure), '卡工程同步'); }
       else if (report.refreshWarning) panel?.showError(`写入已完成，但界面刷新失败：${report.refreshWarning}`);
     }
   } catch (error) {
@@ -258,6 +258,6 @@ if (!window.__TT_CARD_BRIDGE__) {
     tick();
   } catch (error) {
     console.error(TAG, error);
-    toastr.error(errText(error), '卡工程同步面板加载失败');
+    globalThis.toastr?.error(errText(error), '卡工程同步面板加载失败');
   }
 }

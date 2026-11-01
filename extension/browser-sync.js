@@ -8602,6 +8602,7 @@ const __mod_forge_png = (() => {
 // png.mjs — PNG tEXt/zTXt/iTXt 中 chara 负载的嵌入与解出
 // 原则：只动 chara/ccv3 负载块，其余数据块逐字节保留。
 
+
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 // crc32（查表法，覆盖 chunk type + data）
@@ -8710,6 +8711,7 @@ const __mod_bridge_png = (() => {
 // png.mjs — PNG tEXt/zTXt/iTXt 中 chara 负载的嵌入与解出
 // 原则：只动 chara/ccv3 负载块，其余数据块逐字节保留。
 
+
 const PNG_SIG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 // crc32（查表法，覆盖 chunk type + data）
@@ -8813,6 +8815,7 @@ const __mod_fp = (() => {
 const fs = fsp;
 
 
+
 const RULES_VERSION = 'protocol-0.1';
 
 function sha256Hex(text) {
@@ -8876,6 +8879,7 @@ const __mod_extras = (() => {
 // 序号是原卡里的位置（从 1 起）。拆的时候没勾、留在 card.md 里的项，装配时按原顺序补进空出来的序号，
 // 所以只拆一部分也不会打乱执行顺序。每楼的 stat_data、小白X 变量值属于聊天记录，不在卡里，也不导出。
 const fs = fsp;
+
 
 const VARS_FILE = 'scripts/variables.json';
 const XB_FILE = 'scripts/xiaobaix-tasks.json';
@@ -9130,9 +9134,9 @@ const __mod_nodes = (() => {
 // nodes.mjs — 扫描节点树、解析 frontmatter、提取正文
 // 协议依据：docs/spec/node-protocol.md v0.1（已冻结）
 const fs = fsp;
+
+
 const { readExtras } = __mod_extras;
-
-
 
 const BODY_MARK = '<!-- body -->';
 // handoff/ 放进度记录、冻结版本、候选与会话，与 note/ 一样不是节点目录
@@ -9737,21 +9741,15 @@ const __mod_build = (() => {
 // build.mjs — 从已确认主源装配 Character Card V2 JSON / PNG
 // 不生成新设定；协议有 error 时拒绝构建；构建失败不覆盖旧成品。
 const fs = fsp;
+
+const execFileSync = () => 'RESULT : PASS';
+
+
 const { scanCard, parsePosition, defaultTarget, assignOrders, bookNodesOf, quoteBarePosition } = __mod_nodes;
 const { validateNodes, formatReport } = __mod_protocol;
 const { sha256Hex, fnv1a } = __mod_fp;
 const { embedChara } = __mod_forge_png;
 const { applyExtras } = __mod_extras;
-const fileURLToPath = () => '/src/forge/cmd/build.mjs';
-const execFileSync = () => 'RESULT : PASS';
-
-
-
-
-
-
-
-
 
 const POSITION_NUM = { before_char: 0, after_char: 1 };
 
@@ -10047,7 +10045,7 @@ async function buildCmd(rootDir, opts = {}) {
   let worldbookCheck = null;
   if (bookCount > 0) {
     // fileURLToPath 解码中文等非 ASCII 路径；URL.pathname 会留下 %E5… 编码，PowerShell 找不到文件
-    const validator = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'skills', 'cf-card-format-export', 'scripts', 'validate-worldbook.ps1');
+    const validator = path.resolve(path.dirname('/src/forge/cmd/build.mjs'), '..', '..', 'skills', 'cf-card-format-export', 'scripts', 'validate-worldbook.ps1');
     const hasValidator = await fs.access(validator).then(() => true, () => false);
     if (hasValidator) {
       try {
@@ -10082,17 +10080,13 @@ const __mod_unpack = (() => {
 // 正文（条目内容、描述、开场白等）只放在 <!-- body --> 之后，不进 tavern 段；正文对不上时报告，不另存一份。
 // 不改原卡；输出目录必须不存在或为空。
 const fs = fsp;
+
+
 const { extractChara } = __mod_forge_png;
 const { scanCard, BODY_MARK } = __mod_nodes;
 const { assemble, entryFromNode } = __mod_build;
 const { fnv1a } = __mod_fp;
 const { listExtras, defaultKeep, keptExtensions, extraFiles, extraBase } = __mod_extras;
-
-
-
-
-
-
 
 // 单槽文字字段 → 文件、类型。布局：字段直接放卡文件夹根目录，开场白放 message/
 const FIELD_NODES = {
@@ -10457,13 +10451,11 @@ const __mod_slots = (() => {
 
 
 
-
-
-
 const { parseChunks } = __mod_bridge_png;
-const { contained, segment, readJson, atomicJson } = __mod_safety;
 const tavernUserDir = () => '/tavern/default-user';
 const tavernCharDir = () => '/tavern/default-user/characters';
+const { contained, segment, readJson, atomicJson } = __mod_safety;
+
 const forge = async () => __mod_extras;
 const extrasLib = __mod_extras;
 // 键名排序后的 JSON：正则、脚本等整项比对，键顺序不算差异
@@ -10727,8 +10719,7 @@ return { occupiesTarget, reservedTargets, targetOccupied, BACKUPS_DIR, INTERNAL_
 
 const __mod_world_ids = (() => {
 // Read-only ID planning.
-const { fail, contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject } = __mod_safety;
-const { slotHash } = __mod_slots;
+const { fail, hashObject } = __mod_safety;
 
 const isWorldEntryPath = rel => /^world_book\/(?:[^/]+\/)*[^/]+\.md$/.test(rel.replaceAll('\\', '/'));
 const entryUid = (node, fp) => node.frontmatter?.tavern?.id ?? fp.fnv1a(node.id);
@@ -10807,9 +10798,8 @@ return { isWorldEntryPath, entryUid, reliableBaseline, planWorldEntryIds, assert
 
 const __mod_sync_engine = (() => {
 // The sole three-way comparison used by HTTP, mirror, push and pull.
-
-const { fail, hashObject } = __mod_safety;
 const { slotHash } = __mod_slots;
+const { fail, hashObject } = __mod_safety;
 
 function compareSnapshot(snapshot) {
   const { nodes, tavern, baseline, resolved = new Set(), open = new Set() } = snapshot;
@@ -10923,17 +10913,13 @@ const __mod_adapter = (() => {
 
 
 
-const { tavernUserDir, tavernCharDir } = { tavernUserDir: () => '/tavern/default-user', tavernCharDir: () => '/tavern/default-user/characters' };
-const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, tryWorldFilePath, readCardPng, extraSlots, extraOrder, stableJson, extrasLib } = __mod_slots;
-const { publishCardJob, getJobResult } = { publishCardJob: async () => ({}), getJobResult: async () => ({ pending: false }) };
+
+const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, tryWorldFilePath, readCardPng, extrasLib } = __mod_slots;
 const { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } = __mod_safety;
 const { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } = __mod_projects;
 const { planWorldEntryIds, assertUniqueEntryUids, isWorldEntryPath, reliableBaseline } = __mod_world_ids;
-
-
-
-
-
+const publishCardJob = async () => ({});
+const getJobResult = async () => ({ pending: false });
 const inspectSkillsAndAgents = async () => ({ available: false, skills: [], missingNames: [], leftovers: [], agentPrompt: { exists: false }, summary: '当前为浏览器本地文件夹直连模式，已内置完整拆卡、装卡与实时同步，无需安装额外技能。' });
 const deploySkillsAndAgents = async () => ({ available: false, summary: '当前为浏览器本地文件夹直连模式，无需部署外部技能。' });
 
@@ -11525,7 +11511,8 @@ class FileSyncAdapter {
       const effData = effective.data ?? effective;
       if (remote.worldRaw !== null) {
         const book = unpack.worldFileToCard(JSON.parse(remote.worldRaw), remote.worldName).data.character_book;
-        effData.character_book = book;
+        if (book?.entries?.length) effData.character_book = book;
+        else if (effData.character_book == null || !effData.character_book?.entries?.length) delete effData.character_book;
       } else if (effData.character_book == null) {
         // 酒馆新建的空卡写的是 character_book: null。空卡拆出来没有条目，合成时也不会生成这个键；
         // 留着 null 会让往返比对把「null 对没有」当成不一致。只删源副本里的这个键，酒馆里的卡不动。
@@ -11586,7 +11573,6 @@ const __mod_service = (() => {
 const { discoverProjects, reservedTargets, targetOccupied, isSingleCardDirectory, sameProjectPath } = __mod_projects;
 const { SyncEngine } = __mod_sync_engine;
 const { SerialQueue, contained, segment, readJson, atomicJson, fail } = __mod_safety;
-
 
 const compactDiff = diff => (!diff || typeof diff !== 'object' || !Array.isArray(diff.slots))
   ? diff
@@ -12402,6 +12388,11 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
 
     const wantedWorlds = new Set(extraWorlds.filter(Boolean));
+    for (const c of characters) {
+      if (!c.avatar || !activeAvatars.has(c.avatar)) continue;
+      const w = typeof c?.data?.extensions?.world === 'string' ? c.data.extensions.world.trim() : '';
+      if (w) wantedWorlds.add(w);
+    }
     const domWorld = globalThis.document?.querySelector?.('#world_editor_select option:checked')?.textContent?.trim();
     if (domWorld && !domWorld.startsWith('---')) wantedWorlds.add(domWorld);
 
@@ -12420,7 +12411,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           const buf = new BrowserBuffer(await res.arrayBuffer());
           __vfsFiles.set(vfsPath, { bytes: buf, mtimeMs: Date.now() });
           try {
-            const card = __mod_Slots.readCardPng(buf);
+            const card = __mod_slots.readCardPng(buf);
             const w = typeof card?.data?.extensions?.world === 'string' ? card.data.extensions.world.trim() : '';
             cardWorldCache.set(avatar, w);
             if (w) wantedWorlds.add(w);
@@ -12499,6 +12490,67 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     }
   }
 
+  function bookToWorldObj(book) {
+    const st = getContext?.();
+    if (typeof st?.convertCharacterBook === 'function') {
+      const converted = st.convertCharacterBook(structuredClone(book ?? { entries: [] }));
+      if (converted?.entries) {
+        return {
+          entries: converted.entries,
+          ...(book?.description ? { description: book.description } : {}),
+        };
+      }
+    }
+    const entries = Object.fromEntries(((book?.entries) ?? []).map((entry, index) => {
+      const uid = entry.id ?? index;
+      return [String(uid), {
+        uid,
+        key: entry.keys ?? [],
+        keysecondary: entry.secondary_keys ?? [],
+        comment: entry.comment ?? entry.name ?? '',
+        content: entry.content ?? '',
+        constant: Boolean(entry.constant),
+        selective: Boolean(entry.selective),
+        order: entry.insertion_order ?? 100,
+        position: entry.extensions?.position ?? (entry.position === 'after_char' ? 1 : 0),
+        excludeRecursion: entry.extensions?.exclude_recursion ?? false,
+        preventRecursion: entry.extensions?.prevent_recursion ?? false,
+        delayUntilRecursion: entry.extensions?.delay_until_recursion ?? false,
+        disable: entry.enabled === false,
+        addMemo: Boolean(entry.comment ?? entry.name),
+        displayIndex: entry.extensions?.display_index ?? index,
+        probability: entry.extensions?.probability ?? 100,
+        useProbability: entry.extensions?.useProbability ?? true,
+        depth: entry.extensions?.depth ?? 4,
+        selectiveLogic: entry.extensions?.selectiveLogic ?? 0,
+        outletName: entry.extensions?.outlet_name ?? '',
+        group: entry.extensions?.group ?? '',
+        groupOverride: entry.extensions?.group_override ?? false,
+        groupWeight: entry.extensions?.group_weight ?? 100,
+        scanDepth: entry.extensions?.scan_depth ?? null,
+        caseSensitive: entry.extensions?.case_sensitive ?? null,
+        matchWholeWords: entry.extensions?.match_whole_words ?? null,
+        useGroupScoring: entry.extensions?.use_group_scoring ?? null,
+        automationId: entry.extensions?.automation_id ?? '',
+        role: entry.extensions?.role ?? 0,
+        vectorized: entry.extensions?.vectorized ?? false,
+        sticky: entry.extensions?.sticky ?? null,
+        cooldown: entry.extensions?.cooldown ?? null,
+        delay: entry.extensions?.delay ?? null,
+        matchPersonaDescription: entry.extensions?.match_persona_description ?? false,
+        matchCharacterDescription: entry.extensions?.match_character_description ?? false,
+        matchCharacterPersonality: entry.extensions?.match_character_personality ?? false,
+        matchCharacterDepthPrompt: entry.extensions?.match_character_depth_prompt ?? false,
+        matchScenario: entry.extensions?.match_scenario ?? false,
+        matchCreatorNotes: entry.extensions?.match_creator_notes ?? false,
+        extensions: entry.extensions ?? {},
+        triggers: entry.extensions?.triggers ?? [],
+        ignoreBudget: entry.extensions?.ignore_budget ?? false,
+      }];
+    }));
+    return { entries, ...(book?.description ? { description: book.description } : {}) };
+  }
+
   async function ensureService() {
     if (service) return service;
     const transport = async job => {
@@ -12516,20 +12568,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         }
         if (job.worldName) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
-            ...(e.extensions ?? {}),
-            uid: e.id ?? i,
-            key: e.keys ?? [],
-            keysecondary: e.secondary_keys ?? [],
-            comment: e.comment ?? e.name ?? '',
-            content: e.content ?? '',
-            constant: Boolean(e.constant),
-            selective: Boolean(e.selective),
-            order: e.insertion_order ?? 100,
-            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
-            disable: e.enabled === false,
-          }]));
-          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          const worldObj = job.world?.entries ? job.world : bookToWorldObj(job.book);
           __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(worldObj, null, 2) + '\n', 'utf8', false);
         }
         return report;
@@ -12542,20 +12581,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         }
         if (job.worldName && (job.book || job.world)) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
-            ...(e.extensions ?? {}),
-            uid: e.id ?? i,
-            key: e.keys ?? [],
-            keysecondary: e.secondary_keys ?? [],
-            comment: e.comment ?? e.name ?? '',
-            content: e.content ?? '',
-            constant: Boolean(e.constant),
-            selective: Boolean(e.selective),
-            order: e.insertion_order ?? 100,
-            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
-            disable: e.enabled === false,
-          }]));
-          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          const worldObj = job.world?.entries ? job.world : bookToWorldObj(job.book);
           __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(worldObj, null, 2) + '\n', 'utf8', false);
         }
       }
