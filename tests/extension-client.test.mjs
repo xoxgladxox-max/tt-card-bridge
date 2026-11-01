@@ -498,6 +498,10 @@ test('browser-sync runtime prompts user confirmation first, then unpacks and syn
         await client.status();
         assert.equal(pushedJobs.length, 1);
         assert.equal(pushedJobs[0].card.data.description, '修改后的设定正文');
+
+        // 5. 在浏览器端执行 reconnectNew（调用 embedChara -> makeChunk -> head.write 生成新 PNG）
+        const created = await client.control('reconnectNew', { projectId: '测试角色' });
+        assert.equal(created.cardFile, '测试角色 2.png');
     } finally {
         globalThis.window = prevWindow;
     }

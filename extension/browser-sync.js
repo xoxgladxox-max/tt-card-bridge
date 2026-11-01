@@ -68,6 +68,14 @@ class BrowserBuffer extends Uint8Array {
     this[offset + 3] = v & 0xff;
     return offset + 4;
   }
+  write(string, offset = 0, length = this.length - offset, encoding = 'utf8') {
+    if (typeof offset === 'string') { encoding = offset; offset = 0; length = this.length; }
+    else if (typeof length === 'string') { encoding = length; length = this.length - offset; }
+    const src = BrowserBuffer.from(String(string ?? ''), encoding);
+    const n = Math.min(src.length, Math.max(0, length), Math.max(0, this.length - offset));
+    for (let i = 0; i < n; i++) this[offset + i] = src[i];
+    return n;
+  }
   toString(encoding = 'utf8', start = 0, end = this.length) {
     const sub = this.subarray(start, end);
     if (encoding === 'latin1' || encoding === 'binary') {
@@ -12200,7 +12208,7 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
         if (p.cardFile && !p.cardFile.startsWith('world:')) activeAvatars.add(p.cardFile);
       }
     }
-    const existingSet = new Set(characters.map(c => c.avatar).filter(Boolean));
+    const existingSet = new Set([...characters.map(c => c.avatar), ...extraCards].filter(Boolean));
     for (const k of [...__vfsFiles.keys()]) {
       if (k.startsWith('/tavern/default-user/characters/')) {
         const name = k.slice('/tavern/default-user/characters/'.length);
@@ -12320,7 +12328,21 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
     if (service) return service;
     const transport = async job => {
       let report;
-      if (job.op === 'create') report = await mutations.create(job);
+      if (job.op === 'create') {
+        report = await mutations.create(job);
+        const createdAvatar = report?.avatar || job.avatar;
+        if (createdAvatar && job.pngBase64) {
+          __vfsEnsureDir('/tavern/default-user/characters', false);
+          __vfsFiles.set(`/tavern/default-user/characters/${createdAvatar}`, {
+            bytes: BrowserBuffer.from(job.pngBase64, 'base64'),
+            mtimeMs: Date.now(),
+          });
+        }
+        if (job.worldName && job.world) {
+          __vfsEnsureDir('/tavern/default-user/worlds', false);
+          __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(job.world, null, 2) + '\n', 'utf8', false);
+        }
+      }
       else if (job.op === 'rename') report = await runRenameJob(job);
       else if (job.worldName && !job.card) report = await mutations.runWorld(job);
       else report = await mutations.runCard(job);
