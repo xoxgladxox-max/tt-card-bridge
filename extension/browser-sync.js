@@ -9710,8 +9710,11 @@ function entryShape(n) {
   } else {
     const t = String(title);
     if (/[\\/]/.test(t)) add('P18', `title「${t}」里有路径分隔符：标题写给人看的名字，不写路径`);
-    // P18c 编号保留不用：标题用最短的自然叫法，
-    // 不要求包含 name / part 全称；唯一性由 P18d 查，分不清由 cf-card-review C15 读正文判
+    // P18f 当文件名不带数字排序前缀（如 01-、01b-）且与 title 完全不同时，提醒改文件名要同步改 title
+    const cleanStem = String(n.stem ?? '').replace(/^\d+[a-z]?[-_.·\s]+/i, '').trim();
+    if (cleanStem && t.trim() && cleanStem !== t.trim() && !t.includes(cleanStem) && !cleanStem.includes(t.trim())) {
+      add('P18f', `文件名「${n.stem}」与 title「${t}」不一致：酒馆世界书列表以 title 为准，若想修改酒馆里的条目名请同步修改 title`);
+    }
   }
   return { problems, blocks };
 }
@@ -9758,39 +9761,47 @@ const POSITION_NUM = { before_char: 0, after_char: 1 };
 function positionFields(n) {
   const pos = parsePosition(n.position);
   if (!pos) throw new Error(`${n.relPath}：position ${JSON.stringify(n.position)} 不合法（应先被协议 P12 拦下）`);
+  const fmDepth = typeof n.frontmatter?.depth === 'number' && Number.isFinite(n.frontmatter.depth) ? n.frontmatter.depth : 4;
   if (pos.kind === 'depth') return { top: 'before_char', ext: 4, depth: pos.depth };
-  return { top: pos.kind, ext: POSITION_NUM[pos.kind], depth: 4 };
+  return { top: pos.kind, ext: POSITION_NUM[pos.kind], depth: fmDepth };
 }
 
 function entryFromNode(n, displayIndex, order) {
   const pos = positionFields(n);
+  const fm = n.frontmatter ?? {};
+  const enabled = typeof fm.enabled === 'boolean' ? fm.enabled : true;
+  const excludeRecursion = typeof fm.exclude_recursion === 'boolean' ? fm.exclude_recursion : !n.recursion;
+  const preventRecursion = typeof fm.prevent_recursion === 'boolean' ? fm.prevent_recursion : !n.recursion;
+  const probability = typeof fm.probability === 'number' && Number.isFinite(fm.probability) ? fm.probability : 100;
+  const selectiveLogic = typeof fm.selectiveLogic === 'number' && Number.isFinite(fm.selectiveLogic) ? fm.selectiveLogic : 0;
+  const scanDepth = typeof fm.scan_depth === 'number' && Number.isFinite(fm.scan_depth) ? fm.scan_depth : null;
   return {
     id: fnv1a(n.id),
     keys: n.keys,
     secondary_keys: n.secondary,
-    comment: String(n.frontmatter?.title ?? n.stem).slice(0, 100),
+    comment: String(fm.title ?? n.stem).slice(0, 100),
     content: n.body.replace(/\n$/, ''),
     constant: n.constant,
     selective: n.secondary.length > 0,
     insertion_order: order,
-    enabled: true,
+    enabled,
     position: pos.top,
     use_regex: true,
     extensions: {
       position: pos.ext,
-      exclude_recursion: !n.recursion,
+      exclude_recursion: excludeRecursion,
       display_index: displayIndex,
-      probability: 100,
+      probability,
       useProbability: true,
       depth: pos.depth,
-      selectiveLogic: 0,
+      selectiveLogic,
       outlet_name: '',
       group: '',
       group_override: false,
       group_weight: 100,
-      prevent_recursion: !n.recursion,
+      prevent_recursion: preventRecursion,
       delay_until_recursion: false,
-      scan_depth: null,
+      scan_depth: scanDepth,
       match_whole_words: null,
       use_group_scoring: false,
       case_sensitive: null,
@@ -9808,7 +9819,7 @@ function entryFromNode(n, displayIndex, order) {
       match_creator_notes: false,
       triggers: [],
       // 三明治首尾要设预算豁免：酒馆超预算时先丢 order 小的，开头会先被截掉（world-info.js 预算检查）
-      ignore_budget: n.frontmatter.ignore_budget === true,
+      ignore_budget: fm.ignore_budget === true,
     },
   };
 }
@@ -10716,6 +10727,8 @@ return { occupiesTarget, reservedTargets, targetOccupied, BACKUPS_DIR, INTERNAL_
 
 const __mod_world_ids = (() => {
 // Read-only ID planning.
+const { fail, contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject } = __mod_safety;
+const { slotHash } = __mod_slots;
 
 const isWorldEntryPath = rel => /^world_book\/(?:[^/]+\/)*[^/]+\.md$/.test(rel.replaceAll('\\', '/'));
 const entryUid = (node, fp) => node.frontmatter?.tavern?.id ?? fp.fnv1a(node.id);
@@ -10911,7 +10924,7 @@ const __mod_adapter = (() => {
 
 
 const { tavernUserDir, tavernCharDir } = { tavernUserDir: () => '/tavern/default-user', tavernCharDir: () => '/tavern/default-user/characters' };
-const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extraSlots, extraOrder, stableJson, extrasLib } = __mod_slots;
+const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, tryWorldFilePath, readCardPng, extraSlots, extraOrder, stableJson, extrasLib } = __mod_slots;
 const { publishCardJob, getJobResult } = { publishCardJob: async () => ({}), getJobResult: async () => ({ pending: false }) };
 const { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } = __mod_safety;
 const { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } = __mod_projects;
@@ -11435,8 +11448,14 @@ class FileSyncAdapter {
     const cardFm = snapshot.nodes?.card?.frontmatter ?? {};
     const configuredWorld = snapshot.card?.data?.extensions?.world || cardFm.world || cardFm.world_book_name || null;
     // 如果原世界书与旧工程同名，或用户在 card.md 将世界书改成了新名字，则在改名时同步创建/绑定目标世界书
+    // 这里优先用当前酒馆侧已有的世界书内容初始化新世界书名，让紧随其后的 SyncEngine 三向对比完整看到本地与酒馆的真实差异并更新基线
     const targetWorld = configuredWorld === project.projectName ? project.name : configuredWorld;
-    const book = snapshot.card?.data?.character_book ?? null;
+    let book = snapshot.card?.data?.character_book ? structuredClone(snapshot.card.data.character_book) : null;
+    if (targetWorld && snapshot.worldRaw) {
+      const { unpack } = await this.libraries();
+      const fromRemote = unpack.worldFileToCard(JSON.parse(snapshot.worldRaw), targetWorld)?.data?.character_book;
+      if (fromRemote) book = fromRemote;
+    }
     if (targetWorld && book) book.name = targetWorld;
     const result = await this.send(project, {
       id: jobId,
@@ -12493,11 +12512,27 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
             bytes: BrowserBuffer.from(job.pngBase64, 'base64'),
             mtimeMs: Date.now(),
           });
+          if (job.worldName) cardWorldCache.set(createdAvatar, String(job.worldName).trim());
         }
-        if (job.worldName && job.world) {
+        if (job.worldName) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(job.world, null, 2) + '\n', 'utf8', false);
+          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
+            ...(e.extensions ?? {}),
+            uid: e.id ?? i,
+            key: e.keys ?? [],
+            keysecondary: e.secondary_keys ?? [],
+            comment: e.comment ?? e.name ?? '',
+            content: e.content ?? '',
+            constant: Boolean(e.constant),
+            selective: Boolean(e.selective),
+            order: e.insertion_order ?? 100,
+            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
+            disable: e.enabled === false,
+          }]));
+          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(worldObj, null, 2) + '\n', 'utf8', false);
         }
+        return report;
       }
       else if (job.op === 'rename') {
         report = await runRenameJob(job);
@@ -12505,9 +12540,23 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           __vfsFiles.delete(`/tavern/default-user/characters/${job.avatar}`);
           cardWorldCache.delete(job.avatar);
         }
-        if (job.worldName && job.book) {
+        if (job.worldName && (job.book || job.world)) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(job.book, null, 2) + '\n', 'utf8', false);
+          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
+            ...(e.extensions ?? {}),
+            uid: e.id ?? i,
+            key: e.keys ?? [],
+            keysecondary: e.secondary_keys ?? [],
+            comment: e.comment ?? e.name ?? '',
+            content: e.content ?? '',
+            constant: Boolean(e.constant),
+            selective: Boolean(e.selective),
+            order: e.insertion_order ?? 100,
+            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
+            disable: e.enabled === false,
+          }]));
+          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          __vfsWrite(`/tavern/default-user/worlds/${String(job.worldName).trim()}.json`, JSON.stringify(worldObj, null, 2) + '\n', 'utf8', false);
         }
       }
       else if (job.worldName && !job.card) report = await mutations.runWorld(job);

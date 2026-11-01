@@ -526,8 +526,14 @@ export class FileSyncAdapter {
     const cardFm = snapshot.nodes?.card?.frontmatter ?? {};
     const configuredWorld = snapshot.card?.data?.extensions?.world || cardFm.world || cardFm.world_book_name || null;
     // 如果原世界书与旧工程同名，或用户在 card.md 将世界书改成了新名字，则在改名时同步创建/绑定目标世界书
+    // 这里优先用当前酒馆侧已有的世界书内容初始化新世界书名，让紧随其后的 SyncEngine 三向对比完整看到本地与酒馆的真实差异并更新基线
     const targetWorld = configuredWorld === project.projectName ? project.name : configuredWorld;
-    const book = snapshot.card?.data?.character_book ?? null;
+    let book = snapshot.card?.data?.character_book ? structuredClone(snapshot.card.data.character_book) : null;
+    if (targetWorld && snapshot.worldRaw) {
+      const { unpack } = await this.libraries();
+      const fromRemote = unpack.worldFileToCard(JSON.parse(snapshot.worldRaw), targetWorld)?.data?.character_book;
+      if (fromRemote) book = fromRemote;
+    }
     if (targetWorld && book) book.name = targetWorld;
     const result = await this.send(project, {
       id: jobId,

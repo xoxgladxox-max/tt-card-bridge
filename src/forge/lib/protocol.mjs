@@ -304,8 +304,11 @@ export function entryShape(n) {
   } else {
     const t = String(title);
     if (/[\\/]/.test(t)) add('P18', `title「${t}」里有路径分隔符：标题写给人看的名字，不写路径`);
-    // P18c 编号保留不用：标题用最短的自然叫法，
-    // 不要求包含 name / part 全称；唯一性由 P18d 查，分不清由 cf-card-review C15 读正文判
+    // P18f 当文件名不带数字排序前缀（如 01-、01b-）且与 title 完全不同时，提醒改文件名要同步改 title
+    const cleanStem = String(n.stem ?? '').replace(/^\d+[a-z]?[-_.·\s]+/i, '').trim();
+    if (cleanStem && t.trim() && cleanStem !== t.trim() && !t.includes(cleanStem) && !cleanStem.includes(t.trim())) {
+      add('P18f', `文件名「${n.stem}」与 title「${t}」不一致：酒馆世界书列表以 title 为准，若想修改酒馆里的条目名请同步修改 title`);
+    }
   }
   return { problems, blocks };
 }

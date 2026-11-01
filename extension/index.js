@@ -1,9 +1,9 @@
 // One authenticated loopback connection serves the settings panel and queued tasks.
 // 带上版本号查询参数，避免在酒馆点「更新扩展」后浏览器继续使用旧版子模块缓存
-import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.7';
-import { mountSettings } from './settings.js?v=0.3.7';
-import { createTavernMutations } from './tavern-mutations.js?v=0.3.7';
-import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.7';
+import { createBridgeClient, createJobConsumer } from './client.js?v=0.3.8';
+import { mountSettings } from './settings.js?v=0.3.8';
+import { createTavernMutations } from './tavern-mutations.js?v=0.3.8';
+import { createBrowserSyncRuntime } from './browser-sync.js?v=0.3.8';
 
 const TAG = '[tt-card-bridge]';
 let known = null;
@@ -22,6 +22,11 @@ async function refreshCards(files) {
   if (tt()?.invoke) await tt().invoke.safeInvoke('clear_character_cache');
   const st = ctx();
   await st.getCharacters();
+  if (typeof st.getOneCharacter === 'function') {
+    for (const file of files ?? []) {
+      try { await st.getOneCharacter(file); } catch {}
+    }
+  }
 
   const now = ctx();
   const cid = now.characterId;
@@ -35,12 +40,21 @@ async function refreshCards(files) {
   return `当前角色卡「${current.name}」`;
 }
 
-// 当前打开的卡写回后，通知宿主页面上已安装的公开全局接口（酒馆助手、开场白第0楼、消息重绘）刷新内存状态
+// 当前打开的卡写回后，通知宿主页面上已安装的公开全局接口（世界书绑定状态、酒馆助手、开场白第0楼、消息重绘）刷新内存状态
 async function syncActiveCardRuntime(cid) {
   const latest = ctx();
   const card = latest?.characters?.[cid];
   if (!card) return;
   const ext = card.data?.extensions ?? {};
+  const worldName = typeof ext.world === 'string' ? ext.world : '';
+  const worldInput = document.getElementById('character_world');
+  if (worldInput && worldInput.value !== worldName) {
+    worldInput.value = worldName;
+  }
+  for (const id of ['set_character_world', 'world_button']) {
+    const btn = document.getElementById(id);
+    if (btn?.classList) btn.classList.toggle('world_set', Boolean(worldName));
+  }
   const th = ext.tavern_helper;
   const helper = window.TavernHelper;
   if (helper && th && typeof th === 'object') {

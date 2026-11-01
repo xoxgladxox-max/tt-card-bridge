@@ -95,7 +95,7 @@ export function profileDoc() {
       ],
       deny: [], toolDescriptions: {}, maxRounds: 80, maxCallsPerRun: 80, externalResultInlineCharLimit: 50000, maxCallsPerTool: {},
     },
-    skills: { visible: ['cf-card-research', 'cf-card-character', 'cf-card-format-export', 'cf-card-oneclick', 'cf-card-project', 'cf-card-refine', 'cf-card-review', 'cf-card-worldbook'], deny: [] },
+      skills: { visible: ['cf-card-research', 'cf-card-character', 'cf-card-format-export', 'cf-card-oneclick', 'cf-card-project', 'cf-card-refine', 'cf-card-review', 'cf-card-worldbook', 'cf-card-xiaobaix'], deny: [] },
     workspace: { visibleRoots: ['output', 'scratch', 'plan', 'summaries', 'persist'], writableRoots: ['output', 'scratch', 'plan', 'summaries', 'persist'] },
     plan: { mode: 'none', beta: true, nodes: [] },
     output: { artifacts: [{ id: 'main', path: 'output/main.md', kind: 'markdown', target: 'messageBody', required: true, assemblyOrder: 0 }] },

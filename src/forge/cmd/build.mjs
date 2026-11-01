@@ -19,39 +19,47 @@ export { defaultTarget }; // 实现移到 lib/nodes.mjs，这里保留原导出
 function positionFields(n) {
   const pos = parsePosition(n.position);
   if (!pos) throw new Error(`${n.relPath}：position ${JSON.stringify(n.position)} 不合法（应先被协议 P12 拦下）`);
+  const fmDepth = typeof n.frontmatter?.depth === 'number' && Number.isFinite(n.frontmatter.depth) ? n.frontmatter.depth : 4;
   if (pos.kind === 'depth') return { top: 'before_char', ext: 4, depth: pos.depth };
-  return { top: pos.kind, ext: POSITION_NUM[pos.kind], depth: 4 };
+  return { top: pos.kind, ext: POSITION_NUM[pos.kind], depth: fmDepth };
 }
 
 export function entryFromNode(n, displayIndex, order) {
   const pos = positionFields(n);
+  const fm = n.frontmatter ?? {};
+  const enabled = typeof fm.enabled === 'boolean' ? fm.enabled : true;
+  const excludeRecursion = typeof fm.exclude_recursion === 'boolean' ? fm.exclude_recursion : !n.recursion;
+  const preventRecursion = typeof fm.prevent_recursion === 'boolean' ? fm.prevent_recursion : !n.recursion;
+  const probability = typeof fm.probability === 'number' && Number.isFinite(fm.probability) ? fm.probability : 100;
+  const selectiveLogic = typeof fm.selectiveLogic === 'number' && Number.isFinite(fm.selectiveLogic) ? fm.selectiveLogic : 0;
+  const scanDepth = typeof fm.scan_depth === 'number' && Number.isFinite(fm.scan_depth) ? fm.scan_depth : null;
   return {
     id: fnv1a(n.id),
     keys: n.keys,
     secondary_keys: n.secondary,
-    comment: String(n.frontmatter?.title ?? n.stem).slice(0, 100),
+    comment: String(fm.title ?? n.stem).slice(0, 100),
     content: n.body.replace(/\n$/, ''),
     constant: n.constant,
     selective: n.secondary.length > 0,
     insertion_order: order,
-    enabled: true,
+    enabled,
     position: pos.top,
     use_regex: true,
     extensions: {
       position: pos.ext,
-      exclude_recursion: !n.recursion,
+      exclude_recursion: excludeRecursion,
       display_index: displayIndex,
-      probability: 100,
+      probability,
       useProbability: true,
       depth: pos.depth,
-      selectiveLogic: 0,
+      selectiveLogic,
       outlet_name: '',
       group: '',
       group_override: false,
       group_weight: 100,
-      prevent_recursion: !n.recursion,
+      prevent_recursion: preventRecursion,
       delay_until_recursion: false,
-      scan_depth: null,
+      scan_depth: scanDepth,
       match_whole_words: null,
       use_group_scoring: false,
       case_sensitive: null,
@@ -69,7 +77,7 @@ export function entryFromNode(n, displayIndex, order) {
       match_creator_notes: false,
       triggers: [],
       // 三明治首尾要设预算豁免：酒馆超预算时先丢 order 小的，开头会先被截掉（world-info.js 预算检查）
-      ignore_budget: n.frontmatter.ignore_budget === true,
+      ignore_budget: fm.ignore_budget === true,
     },
   };
 }

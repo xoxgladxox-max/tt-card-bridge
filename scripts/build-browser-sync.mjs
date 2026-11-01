@@ -538,7 +538,7 @@ export const forge = async () => __mod_extras;
 export const extrasLib = __mod_extras;`],
 ]);
 const mWorldIds = wrapModule('__mod_world_ids', 'src/world-entry-ids.mjs', [
-  [/import \{ fail \} from '\.\/safety\.mjs';/, `const { fail, contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject } = __mod_safety;
+  [/import \{[^}]*\} from '\.\/safety\.mjs';/, `const { fail, contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject } = __mod_safety;
 const { slotHash } = __mod_slots;`],
 ]);
 const mSyncEngine = wrapModule('__mod_sync_engine', 'src/sync-engine.mjs', [
@@ -547,7 +547,7 @@ const { slotHash } = __mod_slots;`],
 ]);
 const mAdapter = wrapModule('__mod_adapter', 'src/file-sync-adapter.mjs', [
   [/import \{ BRIDGE_ROOT \} from '\.\/connection\.mjs';/, `const { tavernUserDir, tavernCharDir } = { tavernUserDir: () => '/tavern/default-user', tavernCharDir: () => '/tavern/default-user/characters' };
-const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, readCardPng, extraSlots, extraOrder, stableJson, extrasLib } = __mod_slots;
+const { readSlotsFromNodes, readSlotsFromTavern, attachNodeSettings, saveSyncState, pendingStatus, slotHash, worldFilePath, tryWorldFilePath, readCardPng, extraSlots, extraOrder, stableJson, extrasLib } = __mod_slots;
 const { publishCardJob, getJobResult } = { publishCardJob: async () => ({}), getJobResult: async () => ({ pending: false }) };
 const { contained, segment, nodeFiles, isCardFile, readJson, atomicJson, hashObject, digest, fail, stable, copyTree } = __mod_safety;
 const { discoverProjects, targetOccupied, sameProjectPath, isLegacyNodeDirectory } = __mod_projects;
@@ -903,11 +903,27 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
             bytes: BrowserBuffer.from(job.pngBase64, 'base64'),
             mtimeMs: Date.now(),
           });
+          if (job.worldName) cardWorldCache.set(createdAvatar, String(job.worldName).trim());
         }
-        if (job.worldName && job.world) {
+        if (job.worldName) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(job.world, null, 2) + '\\n', 'utf8', false);
+          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
+            ...(e.extensions ?? {}),
+            uid: e.id ?? i,
+            key: e.keys ?? [],
+            keysecondary: e.secondary_keys ?? [],
+            comment: e.comment ?? e.name ?? '',
+            content: e.content ?? '',
+            constant: Boolean(e.constant),
+            selective: Boolean(e.selective),
+            order: e.insertion_order ?? 100,
+            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
+            disable: e.enabled === false,
+          }]));
+          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(worldObj, null, 2) + '\\n', 'utf8', false);
         }
+        return report;
       }
       else if (job.op === 'rename') {
         report = await runRenameJob(job);
@@ -915,9 +931,23 @@ export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, 
           __vfsFiles.delete(\`/tavern/default-user/characters/\${job.avatar}\`);
           cardWorldCache.delete(job.avatar);
         }
-        if (job.worldName && job.book) {
+        if (job.worldName && (job.book || job.world)) {
           __vfsEnsureDir('/tavern/default-user/worlds', false);
-          __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(job.book, null, 2) + '\\n', 'utf8', false);
+          const entries = Object.fromEntries(((job.book?.entries) ?? []).map((e, i) => [String(e.id ?? i), {
+            ...(e.extensions ?? {}),
+            uid: e.id ?? i,
+            key: e.keys ?? [],
+            keysecondary: e.secondary_keys ?? [],
+            comment: e.comment ?? e.name ?? '',
+            content: e.content ?? '',
+            constant: Boolean(e.constant),
+            selective: Boolean(e.selective),
+            order: e.insertion_order ?? 100,
+            position: e.extensions?.position ?? (e.position === 'after_char' ? 1 : 0),
+            disable: e.enabled === false,
+          }]));
+          const worldObj = job.world ?? { entries, ...(job.book?.description ? { description: job.book.description } : {}) };
+          __vfsWrite(\`/tavern/default-user/worlds/\${String(job.worldName).trim()}.json\`, JSON.stringify(worldObj, null, 2) + '\\n', 'utf8', false);
         }
       }
       else if (job.worldName && !job.card) report = await mutations.runWorld(job);
@@ -1088,6 +1118,32 @@ const fullCode = [
   mService,
   browserRuntimeCode,
 ].join('\n\n');
+
+// 构建期静态校验：确保所有被打包的本地模块 import 的符号均已在各自的 wrapModule 作用域中提供
+const WRAPPED_MODULES = [
+  ['src/forge/lib/protocol.mjs', mProtocol],
+  ['src/forge/cmd/build.mjs', mBuild],
+  ['src/forge/cmd/unpack.mjs', mUnpack],
+  ['src/slots.mjs', mSlots],
+  ['src/world-entry-ids.mjs', mWorldIds],
+  ['src/sync-engine.mjs', mSyncEngine],
+  ['src/file-sync-adapter.mjs', mAdapter],
+  ['src/projects.mjs', mProjects],
+  ['src/sync-service.mjs', mService],
+];
+for (const [relFile, wrappedCode] of WRAPPED_MODULES) {
+  const rawSrc = fs.readFileSync(path.join(ROOT, relFile), 'utf8');
+  for (const m of rawSrc.matchAll(/^import\s+\{([^}]+)\}\s+from\s+'(\.[^']+)';/gm)) {
+    const names = m[1].split(',').map(s => s.trim()).filter(Boolean);
+    for (const sym of names) {
+      if (sym === 'BRIDGE_ROOT') continue;
+      const declRegex = new RegExp(`\\b(const|let|var|function)\\s+[^;=]*\\b${sym}\\b`);
+      if (!declRegex.test(wrappedCode)) {
+        throw new Error(`[build-browser-sync] 模块 ${relFile} 从 ${m[2]} 导入的符号 "${sym}" 未在 wrapModule 中注入！`);
+      }
+    }
+  }
+}
 
 const outPath = path.join(ROOT, 'extension', 'browser-sync.js');
 fs.writeFileSync(outPath, fullCode, 'utf8');

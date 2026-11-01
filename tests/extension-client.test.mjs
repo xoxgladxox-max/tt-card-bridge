@@ -442,13 +442,13 @@ test('browser-sync runtime prompts user confirmation first, then unpacks and syn
                 tags: [],
                 creator: '',
                 character_version: '',
-                extensions: {},
+                extensions: { world: '测试角色' },
             },
         });
         const pushedJobs = [];
         const getContext = () => ({
             characterId: 0,
-            characters: [{ name: '测试角色', avatar: '测试角色.png', description: currentDesc, first_mes: '你好！', data: { name: '测试角色', description: currentDesc, first_mes: '你好！', extensions: {} } }],
+            characters: [{ name: '测试角色', avatar: '测试角色.png', description: currentDesc, first_mes: '你好！', data: { name: '测试角色', description: currentDesc, first_mes: '你好！', extensions: { world: '测试角色' } } }],
             getRequestHeaders: () => ({ 'Content-Type': 'application/json' }),
         });
         const browserSync = createBrowserSyncRuntime({
@@ -465,6 +465,8 @@ test('browser-sync runtime prompts user confirmation first, then unpacks and syn
             runRenameJob: async job => ({ id: job.id, avatar: job.avatar }),
             fetchImpl: async url => {
                 if (String(url).startsWith('/characters/')) return new Response(makeCardPng(), { status: 200 });
+                if (String(url) === '/api/settings/get') return new Response(JSON.stringify({ world_names: ['测试角色'] }), { status: 200 });
+                if (String(url) === '/api/worldinfo/get') return new Response(JSON.stringify({ entries: {} }), { status: 200 });
                 return new Response('{}', { status: 404 });
             },
         });
