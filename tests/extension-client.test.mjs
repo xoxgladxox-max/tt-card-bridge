@@ -520,7 +520,7 @@ test('browser-sync bundle verifies all __mod_* bindings, forbids dangling import
     assert.equal(bundleCode.includes('__mod_slots.readCardPng'), true, 'bundle must use __mod_slots.readCardPng');
 
     const definedMods = new Set();
-    for (const m of bundleCode.matchAll(/const (__mod_[A-Za-z0-9_]+)\s*=\s*await\s+\(async/g)) {
+    for (const m of bundleCode.matchAll(/const (__mod_[A-Za-z0-9_]+)\s*=\s*\(\(\)\s*=>/g)) {
         definedMods.add(m[1]);
     }
     for (const m of bundleCode.matchAll(/\b(__mod_[A-Za-z0-9_]+)\b/g)) {
