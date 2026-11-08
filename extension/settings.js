@@ -550,7 +550,15 @@ export function mountSettings({ client, getContext, refreshCards }) {
             clearPreviews();
             find('diff').replaceChildren(element('p', `已切换工作区目录至：${res.cardsRoot}`));
         },
-        'preview-prompt': async () => {\n            const out = find('skills-output');\n            out.textContent = '正在酒馆执行 Dry-Run 触发预览（不消耗模型额度）…';\n            out.hidden = false;\n            const res = await previewCurrentPrompt({ getContext });\n            out.textContent = formatPreviewSummary(res);\n            out.hidden = false;\n        },\n        'skills-status': async () => {
+        'preview-prompt': async () => {
+            const out = find('skills-output');
+            out.textContent = '正在酒馆执行 Dry-Run 触发预览（不消耗模型额度）…';
+            out.hidden = false;
+            const res = await previewCurrentPrompt({ getContext });
+            out.textContent = formatPreviewSummary(res);
+            out.hidden = false;
+        },
+        'skills-status': async () => {
             const res = await client.control('skillsStatus');
             const out = find('skills-output');
             out.textContent = res.summary ?? JSON.stringify(res, null, 2);
