@@ -1,3 +1,5 @@
+import { previewCurrentPrompt, formatPreviewSummary } from './preview.js?v=0.4.1';
+
 // Settings UI is a consumer of the same service as the CLI, never a second sync engine.
 const text = value => value === undefined || value === null ? '' : String(value);
 const errorText = error => error?.message ?? String(error);
@@ -56,7 +58,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
     root.innerHTML = `
       <div class="inline-drawer">
         <div class="inline-drawer-toggle inline-drawer-header">
-          <b>卡工程同步 <small class="ttcb-dim">v0.4.0</small></b>
+          <b>卡工程同步 <small class="ttcb-dim">v0.4.1</small></b>
           <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
         </div>
         <div class="inline-drawer-content"><div class="ttcb-body">
@@ -97,6 +99,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
           <details class="ttcb-fold" data-fold="tools">
             <summary>工具</summary>
             <div class="flex-container">
+              ${icon('preview-prompt', 'fa-eye', '预览触发', '在酒馆空跑一轮（不发请求给模型、不写聊天记录），查看当前卡实际激活了哪些世界书条目、各分段与总 Token 数')}
               ${icon('skills-status', 'fa-magnifying-glass', '检查技能', '对照原件与 LimCode TEST、Claude Code、~/.agents/skills、酒馆里的技能和 Agent')}
               ${icon('skills-deploy', 'fa-wand-magic-sparkles', '同步技能', '把技能和 Agent 同步到各处')}
               ${icon('logs-toggle', 'fa-list', '日志', '显示或隐藏后台日志')}
@@ -234,7 +237,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
         box.replaceChildren();
         if (!res.items?.length) { box.append(element('small', '这张卡没有正则、脚本或角色变量。')); return; }
         box.append(element('small', '勾上的拆成文件（regex\\、scripts\\），不勾的留在 card.md 里；两种都会完整合回卡里。'));
-        const kinds = { regex: '正则', script: '脚本', vars: '变量', xbtasks: '小白X' };
+        const kinds = { regex: '正则', script: '脚本', vars: '变量', xbtasks: '小白X任务', xbtemplate: '小白X模板', xbvars: '小白X变量' };
         for (const item of res.items) {
             const label = element('label', undefined, 'checkbox_label');
             const cb = element('input'); cb.type = 'checkbox'; cb.checked = item.split; cb.dataset.extraKey = item.key;
@@ -480,7 +483,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
             if (error?.code !== 'ATTACH_CONFLICT' || !String(error.message).includes('同名工程目录')) throw error;
             const d = error.details ?? {};
             const kept = (d.keepGroups ?? []).map(g => g.path.endsWith('/') ? `${g.path}（${g.files} 个文件）` : g.path).join('、');
-            const plan = `\n\n会按酒馆当前内容重新生成：卡内容文件 ${d.replaceCount ?? '?'} 个（card.md、字段、message\\、world_book\\、regex\\、scripts\\）。\n原样保留：${kept || '没有其他文件'}。\n条目文件名按酒馆里的条目标题重新生成，可能和你原来的文件名不同。`;
+            const plan = `\n\n会按酒馆当前内容重新生成：卡内容文件 ${d.replaceCount ?? '?'} 个（card.md、字段、message\\、lorebooks\\、regex\\、scripts\\）。\n原样保留：${kept || '没有其他文件'}。\n条目文件名按酒馆里的条目标题重新生成，可能和你原来的文件名不同。`;
             if (!confirmAction(`本地已存在同名工程目录（${label}）。${plan}\n\n被重新生成的卡内容文件不会备份。是否覆盖？`)) throw error;
             await client.control(actionName, { ...payload, overwrite: true });
         }
@@ -547,7 +550,7 @@ export function mountSettings({ client, getContext, refreshCards }) {
             clearPreviews();
             find('diff').replaceChildren(element('p', `已切换工作区目录至：${res.cardsRoot}`));
         },
-        'skills-status': async () => {
+        'preview-prompt': async () => {\n            const out = find('skills-output');\n            out.textContent = '正在酒馆执行 Dry-Run 触发预览（不消耗模型额度）…';\n            out.hidden = false;\n            const res = await previewCurrentPrompt({ getContext });\n            out.textContent = formatPreviewSummary(res);\n            out.hidden = false;\n        },\n        'skills-status': async () => {
             const res = await client.control('skillsStatus');
             const out = find('skills-output');
             out.textContent = res.summary ?? JSON.stringify(res, null, 2);

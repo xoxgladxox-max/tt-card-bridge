@@ -14,7 +14,7 @@ export function compareSnapshot(snapshot) {
     const remoteNewEntry = !n && !!t && (key.startsWith('entry:') || key.startsWith('greeting:')) && unrecorded;
     const deletedOn = (side, kept) => snapshot.baselineReliable === true && key.startsWith('entry:') && baseline.slots[key] === slotHash(kept.value);
     // 正则、脚本、变量：一边没有时按基线判断是哪边新增、哪边删除
-    const extra = /^(regex|script):|^(vars|xbtasks)$/.test(key);
+    const extra = /^(regex|script):|^(vars|xbtasks|xbtemplate|xbvars)$/.test(key);
     const base0 = baseline?.slots?.[key];
     if (extra && (!n || !t)) {
       const has = n ?? t;

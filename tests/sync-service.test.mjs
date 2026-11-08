@@ -387,7 +387,7 @@ test('concurrent edit before writeBodies invalidates new-entry plan without repl
 });
 test('bad file format pauses only this card with file list, touches nothing', async t => {
   const f = await newEntryFixture(t), png = fs.readFileSync(f.pngPath);
-  fs.writeFileSync(f.file, '---\ntype: lore\ntitle: Broken\n---\nno body mark here\n');
+  fs.writeFileSync(f.file, '---\nid: broken-1\ntype: lore\ntitle: Broken\n---\n\n<!-- body -->\nfirst\n<!-- body -->\nsecond\n');
   const before = tree(f.project.dir);
   await assert.rejects(f.engine.run(f.project), e => e.code === 'INVALID_FORMAT' && e.details.badFiles.some(b => b.relPath === 'world_book/new-entry.md'));
   assert.deepEqual(tree(f.project.dir), before); assert.deepEqual(fs.readFileSync(f.pngPath), png);
@@ -431,7 +431,7 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   w1.entries[42].order = 150;
   fs.writeFileSync(worldPath, JSON.stringify(w1, null, 2));
   assert.equal((await engine.run(project)).status, 'clean');
-  const entryMdPath = path.join(project.dir, 'world_book', 'entry.md');
+  const entryMdPath = path.join(project.dir, 'lorebooks', 'entry.md');
   const md1 = fs.readFileSync(entryMdPath, 'utf8');
   assert.match(md1, /tavern-kw/);
   assert.match(md1, /constant:\s*true/);
@@ -441,9 +441,10 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   w2.entries[99] = { uid: 99, key: ['remote-new'], keysecondary: [], content: 'Created in Tavern.', comment: 'TavernAdded', constant: false, disable: false, order: 160, position: 0, depth: 4 };
   fs.writeFileSync(worldPath, JSON.stringify(w2, null, 2));
   assert.equal((await engine.run(project)).status, 'clean');
-  const newMdPath = path.join(project.dir, 'world_book', 'TavernAdded.md');
+  const newMdPath = path.join(project.dir, 'lorebooks', 'TavernAdded.md');
   assert.equal(fs.existsSync(newMdPath), true);
   assert.match(fs.readFileSync(newMdPath, 'utf8'), /Created in Tavern\./);
+  assert.doesNotMatch(fs.readFileSync(newMdPath, 'utf8'), /<!-- body -->/);
 
   const c3 = readCardPng(f.pngPath);
   c3.data.alternate_greetings = ['Hello from Tavern alt greeting!'];
@@ -451,7 +452,7 @@ test('bidirectional real-time sync covers worldbook entry settings, Tavern-creat
   assert.equal((await engine.run(project)).status, 'clean');
   const greet1Path = path.join(project.dir, 'message', '1.md');
   assert.equal(fs.existsSync(greet1Path), true);
-  assert.match(fs.readFileSync(greet1Path, 'utf8'), /Hello from Tavern alt greeting!/);
+  assert.equal(fs.readFileSync(greet1Path, 'utf8'), 'Hello from Tavern alt greeting!\n');
 });
 test('deleted card: status says cardMissing, automatic sync marks onlyNew once and writes nothing, manual sync explains', async t => {
   const adapter = new MemoryAdapter();
@@ -598,6 +599,15 @@ test('frontend cards: supports tuple/legacy tavern_helper, duplicate regex UUIDs
       ['scripts', [{ id: 's1', name: 'MVU_ZOD', content: 'console.log("zod");', enabled: true }]],
       ['variables', { stat_data: { hp: 100 } }],
     ],
+    'xiaobaix-template': {
+      enabled: true,
+      customRegex: '/<hud>/g',
+      template: '<div class="xb-hud">HP</div>',
+    },
+    LittleWhiteBox: {
+      characterId: 'FE',
+      vars: { mood: 'happy' },
+    },
   };
   fs.writeFileSync(path.join(f.userDir, 'characters', 'FE.png'), embedChara(basePng, feCard));
   const p = await f.service.control({ action: 'attach', cardFile: 'FE.png' });
@@ -616,6 +626,9 @@ test('frontend cards: supports tuple/legacy tavern_helper, duplicate regex UUIDs
     '01-MVU_ZOD.js',
     '01-MVU_ZOD.json',
     'variables.json',
+    'xiaobaix-template.html',
+    'xiaobaix-template.json',
+    'xiaobaix-variables.json',
   ]);
   assert.equal((await f.service.control({ action: 'check', projectId: 'FE' })).results[0].diff.clean, true);
 });

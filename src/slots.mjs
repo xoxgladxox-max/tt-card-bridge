@@ -20,10 +20,13 @@ export const extrasLib = await forge('lib/extras.mjs');
 // 键名排序后的 JSON：正则、脚本等整项比对，键顺序不算差异
 const sortKeys = o => Array.isArray(o) ? o.map(sortKeys) : (o && typeof o === 'object') ? Object.fromEntries(Object.keys(o).sort().map(k => [k, sortKeys(o[k])])) : o;
 export const stableJson = v => JSON.stringify(sortKeys(v), null, 2);
-// 可拆项槽位：regex:<id>、script:<id>、vars、xbtasks，值是整项 JSON
+// 可拆项槽位：regex:<id>、script:<id>、vars、xbtasks、xbtemplate、xbvars，值是整项 JSON
 export function extraSlots(card) {
   const slots = {};
-  for (const item of extrasLib.listExtras(card)) slots[item.key] = { value: stableJson(item.value), label: `${{ regex: '正则', script: '脚本', vars: '', xbtasks: '' }[item.kind]}${item.kind === 'vars' || item.kind === 'xbtasks' ? '' : '：'}${item.label}`, extraKind: item.kind, extraIndex: item.index };
+  for (const item of extrasLib.listExtras(card)) {
+    const prefix = { regex: '正则', script: '脚本', vars: '', xbtasks: '', xbtemplate: '', xbvars: '' }[item.kind] ?? '';
+    slots[item.key] = { value: stableJson(item.value), label: `${prefix}${prefix ? '：' : ''}${item.label}`, extraKind: item.kind, extraIndex: item.index };
+  }
   return slots;
 }
 export const extraOrder = card => extrasLib.listExtras(card).map(i => i.key);
@@ -68,11 +71,13 @@ export function attachNodeSettings(nodeSlots, assembledCard, scan = null) {
       s.displayIndex = i;
     }
   }
-  const ex = scan?.extras ?? { regex: [], scripts: [], vars: null, xbtasks: null };
+  const ex = scan?.extras ?? { regex: [], scripts: [], vars: null, xbtasks: null, xbtemplate: null, xbvars: null };
   const fileOf = new Map([...ex.regex, ...ex.scripts].map(f => [f.key, f]));
   const fileByPos = new Map([...ex.regex, ...ex.scripts].map(f => [`${f.kind}:${f.n}`, f]));
   if (ex.vars) fileOf.set('vars', { ...ex.vars, base: null });
   if (ex.xbtasks) fileOf.set('xbtasks', { ...ex.xbtasks, base: null });
+  if (ex.xbtemplate) fileOf.set('xbtemplate', { ...ex.xbtemplate, base: null });
+  if (ex.xbvars) fileOf.set('xbvars', { ...ex.xbvars, base: null });
   for (const [key, slot] of Object.entries(extraSlots(assembledCard))) {
     const f = (slot.extraIndex !== undefined ? fileByPos.get(`${slot.extraKind}:${slot.extraIndex + 1}`) : null) ?? fileOf.get(key);
     nodeSlots.slots[key] = f ? { ...slot, relPath: f.files[0], files: f.files, base: f.base } : { ...slot, relPath: 'card.md', kept: true };

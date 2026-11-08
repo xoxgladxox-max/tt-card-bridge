@@ -10,23 +10,30 @@ import path from 'node:path';
 
 export const VARS_FILE = 'scripts/variables.json';
 export const XB_FILE = 'scripts/xiaobaix-tasks.json';
+export const XB_TPL_JSON = 'scripts/xiaobaix-template.json';
+export const XB_TPL_HTML = 'scripts/xiaobaix-template.html';
+export const XB_VARS_FILE = 'scripts/xiaobaix-variables.json';
 export const EXTRA_DIRS = ['regex', 'scripts'];
 const KIND_DIR = { regex: 'regex', script: 'scripts' };
 const SIDE = { regex: { key: 'replaceString', ext: '.html' }, script: { key: 'content', ext: '.js' } };
 
-export const isExtraKey = key => /^(regex|script):/.test(key) || key === 'vars' || key === 'xbtasks';
+export const isExtraKey = key => /^(regex|script):/.test(key) || key === 'vars' || key === 'xbtasks' || key === 'xbtemplate' || key === 'xbvars';
 export const extraKind = key => key.startsWith('regex:') ? 'regex' : key.startsWith('script:') ? 'script' : key;
 // 同步槽位名：有 id 用 id，没有时用名字
 export const itemKey = (kind, v) => kind === 'regex' ? `regex:${v?.id ?? v?.scriptName ?? ''}`
   : kind === 'script' ? `script:${v?.id ?? v?.name ?? ''}` : kind;
 export const itemLabel = (kind, v, i = 0) => kind === 'regex' ? String(v?.scriptName || `正则 ${i + 1}`)
-  : kind === 'script' ? String(v?.name || `脚本 ${i + 1}`) : kind === 'vars' ? '角色变量' : '小白X 任务';
+  : kind === 'script' ? String(v?.name || `脚本 ${i + 1}`)
+  : kind === 'vars' ? '角色变量'
+  : kind === 'xbtemplate' ? '小白X 模板'
+  : kind === 'xbvars' ? '小白X 变量'
+  : '小白X 任务';
 
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
 const isThTuple = v => Array.isArray(v) && v.every(it => Array.isArray(it) && typeof it[0] === 'string');
 const varsPresent = v => isObj(v) && Object.keys(v).length > 0;
 const xbPresent = v => isObj(v) && (Array.isArray(v.tasks) ? v.tasks.length > 0 : Object.keys(v).length > 0);
-const xbTemplatePresent = v => isObj(v) && (v.enabled === true || Boolean(v.template));
+const xbTemplatePresent = v => isObj(v) && (v.enabled === true || Boolean(v.template) || Boolean(v.htmlTemplate));
 const lwbPresent = v => isObj(v) && Object.keys(v).length > 0;
 
 // 统一读取酒馆助手的 3 种存储形态：
@@ -69,6 +76,8 @@ export function listExtras(card) {
   });
   if (varsPresent(th.variables)) items.push({ key: 'vars', kind: 'vars', index: 0, label: '角色变量', disabled: false, value: th.variables });
   if (xbPresent(x['xiaobaix-tasks'])) items.push({ key: 'xbtasks', kind: 'xbtasks', index: 0, label: '小白X 任务', disabled: false, value: x['xiaobaix-tasks'] });
+  if (xbTemplatePresent(x['xiaobaix-template'])) items.push({ key: 'xbtemplate', kind: 'xbtemplate', index: 0, label: '小白X 模板', disabled: x['xiaobaix-template']?.enabled === false, value: x['xiaobaix-template'] });
+  if (lwbPresent(x.LittleWhiteBox)) items.push({ key: 'xbvars', kind: 'xbvars', index: 0, label: '小白X 变量', disabled: false, value: x.LittleWhiteBox });
   return items;
 }
 // 默认全拆（前端卡的手机版状态栏、离线版美化等常以 disabled: true 存放在卡内供切换，若留在 card.md 会把数百 KB 的 HTML 塞进 YAML）
@@ -115,6 +124,8 @@ export function keptExtensions(ext, keep) {
     x.TavernHelper_scripts = filterList(x.TavernHelper_scripts, 'script').left;
   }
   if (xbPresent(x['xiaobaix-tasks']) && !keep.has('xbtasks')) delete x['xiaobaix-tasks'];
+  if (xbTemplatePresent(x['xiaobaix-template']) && !keep.has('xbtemplate')) delete x['xiaobaix-template'];
+  if (lwbPresent(x.LittleWhiteBox) && !keep.has('xbvars')) delete x.LittleWhiteBox;
   return x;
 }
 
@@ -127,6 +138,16 @@ export function extraFiles(kind, value, base) {
   const json = v => JSON.stringify(v, null, 2) + '\n';
   if (kind === 'vars') return { [VARS_FILE]: json(value) };
   if (kind === 'xbtasks') return { [XB_FILE]: json(value) };
+  if (kind === 'xbvars') return { [XB_VARS_FILE]: json(value) };
+  if (kind === 'xbtemplate') {
+    const htmlKey = isObj(value) && typeof value.template === 'string' ? 'template'
+      : (isObj(value) && typeof value.htmlTemplate === 'string' ? 'htmlTemplate' : null);
+    if (htmlKey && value[htmlKey].length > 0) {
+      const { [htmlKey]: html, ...rest } = value;
+      return { [XB_TPL_JSON]: json(rest), [XB_TPL_HTML]: html };
+    }
+    return { [XB_TPL_JSON]: json(value) };
+  }
   const side = SIDE[kind];
   if (isObj(value) && typeof value[side.key] === 'string' && (kind !== 'regex' || value[side.key].length > 0)) {
     const { [side.key]: text, ...rest } = value;
@@ -142,9 +163,11 @@ async function readJsonFile(root, rel) {
 }
 const exists = async file => { try { await fs.access(file); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
 
+const SINGLETON_FILES = new Set([VARS_FILE, XB_FILE, XB_TPL_JSON, XB_TPL_HTML, XB_VARS_FILE]);
+
 // 读工程里的拆分文件
 export async function readExtras(root) {
-  const out = { regex: [], scripts: [], vars: null, xbtasks: null };
+  const out = { regex: [], scripts: [], vars: null, xbtasks: null, xbtemplate: null, xbvars: null };
   for (const kind of ['regex', 'script']) {
     const dir = KIND_DIR[kind], side = SIDE[kind];
     let names;
@@ -152,7 +175,7 @@ export async function readExtras(root) {
     const groups = new Map();
     for (const name of names.sort()) {
       const rel = `${dir}/${name}`;
-      if (rel === VARS_FILE || rel === XB_FILE || name.startsWith('.')) continue;
+      if (SINGLETON_FILES.has(rel) || name.startsWith('.')) continue;
       const ext = path.extname(name);
       if (ext !== '.json' && ext !== side.ext) continue;
       const base = rel.slice(0, -ext.length);
@@ -171,6 +194,14 @@ export async function readExtras(root) {
   }
   if (await exists(path.join(root, VARS_FILE))) out.vars = { files: [VARS_FILE], value: await readJsonFile(root, VARS_FILE) };
   if (await exists(path.join(root, XB_FILE))) out.xbtasks = { files: [XB_FILE], value: await readJsonFile(root, XB_FILE) };
+  const hasTplJson = await exists(path.join(root, XB_TPL_JSON));
+  const hasTplHtml = await exists(path.join(root, XB_TPL_HTML));
+  if (hasTplJson || hasTplHtml) {
+    const settings = hasTplJson ? await readJsonFile(root, XB_TPL_JSON) : { enabled: true };
+    if (hasTplHtml && isObj(settings)) settings.template = noBom(await fs.readFile(path.join(root, XB_TPL_HTML), 'utf8'));
+    out.xbtemplate = { files: [hasTplJson ? XB_TPL_JSON : null, hasTplHtml ? XB_TPL_HTML : null].filter(Boolean), value: settings };
+  }
+  if (await exists(path.join(root, XB_VARS_FILE))) out.xbvars = { files: [XB_VARS_FILE], value: await readJsonFile(root, XB_VARS_FILE) };
   return out;
 }
 
@@ -189,7 +220,7 @@ export function mergeOrdered(fileItems, kept) {
 // 装配：把拆分文件合回卡的 extensions（card.md 里的设置已先盖上）
 export function applyExtras(data, extras) {
   if (!extras) return data;
-  const has = extras.regex.length || extras.scripts.length || extras.vars || extras.xbtasks;
+  const has = extras.regex.length || extras.scripts.length || extras.vars || extras.xbtasks || extras.xbtemplate || extras.xbvars;
   if (!has) return data;
   const x = data.extensions = { ...(data.extensions ?? {}) };
   if (extras.regex.length) x.regex_scripts = mergeOrdered(extras.regex, Array.isArray(x.regex_scripts) ? x.regex_scripts : []);
@@ -216,6 +247,8 @@ export function applyExtras(data, extras) {
     }
   }
   if (extras.xbtasks) x['xiaobaix-tasks'] = extras.xbtasks.value;
+  if (extras.xbtemplate) x['xiaobaix-template'] = extras.xbtemplate.value;
+  if (extras.xbvars) x.LittleWhiteBox = extras.xbvars.value;
   return data;
 }
 
@@ -224,6 +257,8 @@ export function setKeptItem(ext, key, value) {
   const x = isObj(ext) ? structuredClone(ext) : {};
   const kind = extraKind(key);
   if (kind === 'xbtasks') { x['xiaobaix-tasks'] = value ?? { tasks: [] }; return x; }
+  if (kind === 'xbtemplate') { x['xiaobaix-template'] = value ?? { enabled: false, template: '' }; return x; }
+  if (kind === 'xbvars') { x.LittleWhiteBox = value ?? {}; return x; }
   const th = () => (x.tavern_helper = isObj(x.tavern_helper) ? x.tavern_helper : {});
   if (kind === 'vars') { th().variables = value ?? {}; return x; }
   const list = kind === 'regex' ? (x.regex_scripts = Array.isArray(x.regex_scripts) ? x.regex_scripts : [])

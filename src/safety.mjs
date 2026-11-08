@@ -51,17 +51,18 @@ export function contained(root, relative) {
   return target;
 }
 // 参与装配的卡工程文件，与 card-forge-lab src/lib/nodes.mjs 的 implied() 同一口径：
-// card.md、根目录字段 .md、message/<n>.md、world_book/**/*.md。调研.md、记录/ 等不算
+// card.md、根目录字段 .md、message/<n>.md、lorebooks/**/*.md（及旧版 world_book/**/*.md）。调研.md、记录/ 等不算
 const FIELD_FILES = new Set(['card', 'description', 'personality', 'scenario', 'mes_example', 'system_prompt', 'post_history_instructions']);
+export const BOOK_DIR_NAMES = new Set(['lorebooks', 'lorebook', 'world_book']);
 export function isCardFile(rel) {
   const parts = rel.split('/');
-  // regex/、scripts/ 下拆出来的正则、脚本、变量文件（只收一层）
+  // regex/、scripts/ 下拆出来的正则、脚本、变量、模板文件（只收一层）
   if (parts.length === 2 && parts[0] === 'regex') return /\.(json|html)$/.test(parts[1]);
-  if (parts.length === 2 && parts[0] === 'scripts') return /\.(json|js)$/.test(parts[1]);
+  if (parts.length === 2 && parts[0] === 'scripts') return /\.(json|js|html)$/.test(parts[1]);
   if (!parts.at(-1).endsWith('.md')) return false;
   if (parts.length === 1) return FIELD_FILES.has(parts[0].slice(0, -3));
   if (parts[0] === 'message') return parts.length === 2 && /^\d+\.md$/.test(parts[1]);
-  return parts[0] === 'world_book';
+  return BOOK_DIR_NAMES.has(parts[0]);
 }
 export function nodeFiles(dir, skip = new Set(['backups', '待归位', '记录', '候选', 'note', 'handoff', 'node_modules', 'dist', '.git', '.card-forge'])) {
   const files = [];
@@ -70,7 +71,10 @@ export function nodeFiles(dir, skip = new Set(['backups', '待归位', '记录',
       if (e.name.startsWith('.') || skip.has(e.name)) continue;
       const next = rel ? `${rel}/${e.name}` : e.name;
       if (e.isSymbolicLink()) fail('INVALID_PATH', `工程含链接：${next}`, 400);
-      if (e.isDirectory()) { if (!rel ? ['message', 'world_book', 'regex', 'scripts'].includes(e.name) : next.startsWith('world_book/')) walk(next); }
+      if (e.isDirectory()) {
+        const top = next.split('/')[0];
+        if (!rel ? (['message', 'regex', 'scripts'].includes(e.name) || BOOK_DIR_NAMES.has(e.name)) : BOOK_DIR_NAMES.has(top)) walk(next);
+      }
       else if (isCardFile(next)) files.push(next);
     }
   };

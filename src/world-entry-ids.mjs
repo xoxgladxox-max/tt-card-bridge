@@ -1,7 +1,7 @@
 // Read-only ID planning.
 import { fail, hashObject } from './safety.mjs';
 
-export const isWorldEntryPath = rel => /^world_book\/(?:[^/]+\/)*[^/]+\.md$/.test(rel.replaceAll('\\', '/'));
+export const isWorldEntryPath = rel => /^(?:lorebooks?|world_book)\/(?:[^/]+\/)*[^/]+\.md$/.test(rel.replaceAll('\\', '/'));
 export const entryUid = (node, fp) => node.frontmatter?.tavern?.id ?? fp.fnv1a(node.id);
 // 文件里没写 id：按文件位置推出的 id 会随改名变，同步时补一个固定 id
 const missingId = node => node.idImplied === true || node.id === null || node.id === undefined || node.id === '';
@@ -10,8 +10,8 @@ export const reliableBaseline = (saved, cardFile) => saved?.cardFile === cardFil
 function insertId(raw, id, lib, YAML) {
   const match = raw.match(/^(\uFEFF?---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))/);
   const eol = raw.includes('\r\n') ? '\r\n' : '\n';
-  // 没有开头设置的散文件：补上只含 id 的开头和正文标记，正文原样保留
-  if (!match) return `---${eol}${YAML.stringify({ id }).trimEnd()}${eol}---${eol}${eol}<!-- body -->${eol}${raw.replace(/^\uFEFF/, '')}`;
+  // 没有开头设置的散文件：补上只含 id 的标准 frontmatter，正文原样保留
+  if (!match) return `---${eol}${YAML.stringify({ id }).trimEnd()}${eol}---${eol}${eol}${raw.replace(/^\uFEFF/, '')}`;
   const doc = YAML.parseDocument(lib.quoteBarePosition(match[2]));
   if (doc.errors.length || !YAML.isMap(doc.contents)) fail('INVALID_PROJECT', 'frontmatter 不是有效键值表，不能补 id');
   let frontmatter;

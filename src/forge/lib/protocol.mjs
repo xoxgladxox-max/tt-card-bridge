@@ -227,6 +227,54 @@ export function validateNodes(scan) {
     }
   }
 
+  // P25 常驻层防递归与下位绿灯触发词泄漏检查
+  {
+    for (const n of book) {
+      if (!n.constant || n.frontmatter?.enabled === false) continue;
+      const fm = n.frontmatter ?? {};
+      const tavExt = fm.tavern?.extensions ?? {};
+      const preventRec = typeof fm.prevent_recursion === 'boolean'
+        ? fm.prevent_recursion
+        : (typeof tavExt.prevent_recursion === 'boolean' ? tavExt.prevent_recursion : !n.recursion);
+      if (!preventRec) {
+        push(warnings, n, 'P25', '常驻条目未开启 prevent_recursion: true：常驻正文参与递归扫描时会连锁引爆绿灯条目，请设 prevent_recursion: true（或删掉 recursion: true）');
+      }
+    }
+    const greenKeys = [];
+    for (const b of book) {
+      if (b.constant || b.frontmatter?.enabled === false) continue;
+      for (const rawKey of b.keys ?? []) {
+        const k = String(rawKey).trim();
+        if (!k || k.length < 2 || (k.startsWith('/') && k.endsWith('/')) || k.startsWith('占位')) continue;
+        greenKeys.push({ key: k, owner: b.relPath });
+      }
+    }
+    if (greenKeys.length > 0) {
+      const alwaysOnNodes = scan.nodes.filter(n => {
+        if (n.type === 'card' || n.type === 'note' || n.frontmatter?.enabled === false || !n.body?.trim()) return false;
+        const t = defaultTarget(n, scan);
+        if (t === 'description' || t === 'system_prompt') return true;
+        return t === 'character_book' && n.constant === true;
+      });
+      for (const c of alwaysOnNodes) {
+        const hitKeys = new Set();
+        const hitOwners = new Set();
+        for (const { key, owner } of greenKeys) {
+          if (owner === c.relPath) continue;
+          if (c.body.includes(key)) {
+            hitKeys.add(key);
+            hitOwners.add(owner);
+          }
+        }
+        if (hitKeys.size > 0) {
+          const sampleKeys = [...hitKeys].slice(0, 8).map(k => `「${k}」`).join('、') + (hitKeys.size > 8 ? `等 ${hitKeys.size} 个词` : '');
+          const sampleOwners = [...hitOwners].slice(0, 4).join('、') + (hitOwners.size > 4 ? `等 ${hitOwners.size} 条` : '');
+          push(warnings, c, 'P25', `常驻层正文包含下位绿灯条目（${sampleOwners}）的触发词 ${sampleKeys}：会导致每轮误触发或污染未登场角色，请先用上位泛用词替换后再移除具体专名`);
+        }
+      }
+    }
+  }
+
   // P21 编号保留不用：world_book/ 下可以建子文件夹分组，装配不看目录，不再报嵌套
 
   // P10 卡根数量与旧版节点树拦截（缺失 card.md 或仍为未迁移的旧版节点树时必须报 error 阻断构建）
@@ -304,10 +352,13 @@ export function entryShape(n) {
   } else {
     const t = String(title);
     if (/[\\/]/.test(t)) add('P18', `title「${t}」里有路径分隔符：标题写给人看的名字，不写路径`);
-    // P18f 当文件名不带数字排序前缀（如 01-、01b-）且与 title 完全不同时，提醒改文件名要同步改 title
+    // P18f 当文件名不带数字排序前缀（如 01-、01b-）且与 title 完全不同时，提醒改文件名要同步改 title；同时检查非角色条目的冗余类型前缀
     const cleanStem = String(n.stem ?? '').replace(/^\d+[a-z]?[-_.·\s]+/i, '').trim();
     if (cleanStem && t.trim() && cleanStem !== t.trim() && !t.includes(cleanStem) && !cleanStem.includes(t.trim())) {
       add('P18f', `文件名「${n.stem}」与 title「${t}」不一致：酒馆世界书列表以 title 为准，若想修改酒馆里的条目名请同步修改 title`);
+    }
+    if (n.type !== 'character' && /^(?:世界|法则|规则|生态|器物|道具|地点|文风|输出|历史)\s*[·•·]\s*\S/.test(t.trim())) {
+      add('P18f', `title「${t}」带有冗余分类前缀：非角色条目请直接写自然名称，去掉「世界 · / 法则 · / 文风 · 」等类型前缀`);
     }
   }
   return { problems, blocks };

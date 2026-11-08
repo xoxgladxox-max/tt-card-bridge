@@ -279,32 +279,32 @@ export class FileSyncAdapter {
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `字段文件已存在：${rel}`);
         planned[rel] = value.replaceAll('\n', '\n') + '\n'; newFiles.add(rel); continue;
       }
-      // 酒馆里新建的备选开场白：生成 message/<序号>.md
+      // 酒馆里新建的备选开场白：生成 message/<序号>.md（纯正文）
       if (!rel && key.startsWith('greeting:')) {
         const idx = Number(key.slice('greeting:'.length)) + 1;
-        const num = String(idx).padStart(2, '0');
         rel = `message/${idx}.md`;
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `开场白文件已存在：${rel}`);
-        const { unpack } = await this.libraries();
-        const fm = { id: `greet-alt-${num}`, type: 'greeting', target: 'alternate_greetings', title: `备选${num}`, order: idx };
-        planned[rel] = unpack.nodeText(fm, value, '酒馆实时同步');
+        planned[rel] = value.replaceAll('\n', '\n') + '\n';
         newFiles.add(rel);
         continue;
       }
-      // 酒馆里新建的世界书条目：生成 world_book/<标题>.md
+      // 酒馆里新建的世界书条目：优先沿用工程里已有的世界书目录（lorebooks / lorebook / world_book），默认 lorebooks/<标题>.md
       if (!rel && key.startsWith('entry:') && remoteEntry) {
         const { unpack } = await this.libraries();
+        const existingBookDir = ['lorebooks', 'lorebook', 'world_book'].find(d =>
+          Object.keys(planned).some(r => r.startsWith(`${d}/`)) || fs.existsSync(path.join(project.dir, d))
+        ) ?? 'lorebooks';
         const usedNames = new Set(
           Object.keys(planned)
-            .filter(r => r.startsWith('world_book/') && r.endsWith('.md'))
+            .filter(r => /^(?:lorebooks?|world_book)\//.test(r) && r.endsWith('.md'))
             .map(r => path.basename(r, '.md').toLowerCase())
         );
         const stem = unpack.safeDirName(remoteEntry.comment || `wb-${remoteEntry.id}`, usedNames);
-        rel = `world_book/${stem}.md`;
+        rel = `${existingBookDir}/${stem}.md`;
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `世界书条目文件已存在：${rel}`);
         const nodeId = `wb-${remoteEntry.id}`;
         const fm = unpack.buildEntryFrontmatter(remoteEntry, nodeId, { existingType: 'lore', displayIndex: remoteEntry.extensions?.display_index ?? -1 });
-        planned[rel] = unpack.nodeText(fm, value, '酒馆实时同步');
+        planned[rel] = unpack.nodeText(fm, value);
         newFiles.add(rel);
         continue;
       }
@@ -330,10 +330,18 @@ export class FileSyncAdapter {
           raw = `${hasBom ? '\uFEFF' : ''}---${eol}${head}${eol}---${clean.slice(fmMatch[0].length)}`;
         }
       }
-      const at = raw.indexOf(BODY);
-      if (at < 0 || raw.indexOf(BODY, at + BODY.length) >= 0 || value.includes(BODY)) fail('INVALID_BODY', `正文标记不唯一：${rel}`, 422);
       const eol = raw.includes('\r\n') ? '\r\n' : '\n';
-      planned[rel] = raw.slice(0, at + BODY.length) + eol + value.replaceAll('\n', eol) + eol;
+      const at = raw.indexOf(BODY);
+      if (at >= 0) {
+        if (raw.indexOf(BODY, at + BODY.length) >= 0 || value.includes(BODY)) fail('INVALID_BODY', `正文标记不唯一：${rel}`, 422);
+        planned[rel] = raw.slice(0, at + BODY.length) + eol + value.replaceAll('\n', eol) + eol;
+      } else {
+        const hasBom = raw.charCodeAt(0) === 0xfeff;
+        const clean = hasBom ? raw.slice(1) : raw;
+        const fmMatch = clean.match(/^---\r?\n[\s\S]*?\r?\n---/);
+        if (!fmMatch) fail('INVALID_BODY', `frontmatter 格式错误：${rel}`, 422);
+        planned[rel] = `${hasBom ? '\uFEFF' : ''}${fmMatch[0]}${eol}${eol}${value.replaceAll('\n', eol)}${eol}`;
+      }
     }
     for (const rel of deleted) {
       const file = contained(project.dir, rel);
@@ -382,10 +390,12 @@ export class FileSyncAdapter {
     const worldOnly = project.cardFile.startsWith('world:');
     const card = worldOnly ? null : structuredClone(snapshot.card);
     if (card) {
-      // 酒馆合并写入时对象里的键不会被删掉：工程里删掉的角色变量、小白X任务写成空值
+      // 酒馆合并写入时对象里的键不会被删掉：工程里删掉的角色变量、小白X任务/模板/变量写成空值
       const x = (card.data.extensions ??= {});
       if (snapshot.tavern.slots.vars && !snapshot.nodes.slots.vars) (x.tavern_helper ??= {}).variables = {};
       if (snapshot.tavern.slots.xbtasks && !snapshot.nodes.slots.xbtasks) x['xiaobaix-tasks'] = { tasks: [] };
+      if (snapshot.tavern.slots.xbtemplate && !snapshot.nodes.slots.xbtemplate) x['xiaobaix-template'] = { enabled: false, template: '' };
+      if (snapshot.tavern.slots.xbvars && !snapshot.nodes.slots.xbvars) x.LittleWhiteBox = {};
       // 数组是整体替换；工程里一条都不剩时要显式写空数组，否则酒馆里的旧内容会留着
       const has = p => Object.keys(snapshot.nodes.slots).some(k => k.startsWith(p)), had = p => Object.keys(snapshot.tavern.slots).some(k => k.startsWith(p));
       if (had('regex:') && !has('regex:')) x.regex_scripts = [];

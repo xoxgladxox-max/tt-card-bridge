@@ -8535,17 +8535,18 @@ function contained(root, relative) {
   return target;
 }
 // 参与装配的卡工程文件，与 card-forge-lab src/lib/nodes.mjs 的 implied() 同一口径：
-// card.md、根目录字段 .md、message/<n>.md、world_book/**/*.md。调研.md、记录/ 等不算
+// card.md、根目录字段 .md、message/<n>.md、lorebooks/**/*.md（及旧版 world_book/**/*.md）。调研.md、记录/ 等不算
 const FIELD_FILES = new Set(['card', 'description', 'personality', 'scenario', 'mes_example', 'system_prompt', 'post_history_instructions']);
+const BOOK_DIR_NAMES = new Set(['lorebooks', 'lorebook', 'world_book']);
 function isCardFile(rel) {
   const parts = rel.split('/');
-  // regex/、scripts/ 下拆出来的正则、脚本、变量文件（只收一层）
+  // regex/、scripts/ 下拆出来的正则、脚本、变量、模板文件（只收一层）
   if (parts.length === 2 && parts[0] === 'regex') return /\.(json|html)$/.test(parts[1]);
-  if (parts.length === 2 && parts[0] === 'scripts') return /\.(json|js)$/.test(parts[1]);
+  if (parts.length === 2 && parts[0] === 'scripts') return /\.(json|js|html)$/.test(parts[1]);
   if (!parts.at(-1).endsWith('.md')) return false;
   if (parts.length === 1) return FIELD_FILES.has(parts[0].slice(0, -3));
   if (parts[0] === 'message') return parts.length === 2 && /^\d+\.md$/.test(parts[1]);
-  return parts[0] === 'world_book';
+  return BOOK_DIR_NAMES.has(parts[0]);
 }
 function nodeFiles(dir, skip = new Set(['backups', '待归位', '记录', '候选', 'note', 'handoff', 'node_modules', 'dist', '.git', '.card-forge'])) {
   const files = [];
@@ -8554,7 +8555,10 @@ function nodeFiles(dir, skip = new Set(['backups', '待归位', '记录', '候�
       if (e.name.startsWith('.') || skip.has(e.name)) continue;
       const next = rel ? `${rel}/${e.name}` : e.name;
       if (e.isSymbolicLink()) fail('INVALID_PATH', `工程含链接：${next}`, 400);
-      if (e.isDirectory()) { if (!rel ? ['message', 'world_book', 'regex', 'scripts'].includes(e.name) : next.startsWith('world_book/')) walk(next); }
+      if (e.isDirectory()) {
+        const top = next.split('/')[0];
+        if (!rel ? (['message', 'regex', 'scripts'].includes(e.name) || BOOK_DIR_NAMES.has(e.name)) : BOOK_DIR_NAMES.has(top)) walk(next);
+      }
       else if (isCardFile(next)) files.push(next);
     }
   };
@@ -8595,7 +8599,7 @@ class SerialQueue {
   }
 }
 
-return { stable, copyTree, BridgeError, fail, digest, hashObject, readJson, atomicJson, segment, contained, isCardFile, nodeFiles, SerialQueue };
+return { stable, copyTree, BridgeError, fail, digest, hashObject, readJson, atomicJson, segment, contained, BOOK_DIR_NAMES, isCardFile, nodeFiles, SerialQueue };
 })();
 
 const __mod_forge_png = (() => {
@@ -8883,23 +8887,30 @@ const fs = fsp;
 
 const VARS_FILE = 'scripts/variables.json';
 const XB_FILE = 'scripts/xiaobaix-tasks.json';
+const XB_TPL_JSON = 'scripts/xiaobaix-template.json';
+const XB_TPL_HTML = 'scripts/xiaobaix-template.html';
+const XB_VARS_FILE = 'scripts/xiaobaix-variables.json';
 const EXTRA_DIRS = ['regex', 'scripts'];
 const KIND_DIR = { regex: 'regex', script: 'scripts' };
 const SIDE = { regex: { key: 'replaceString', ext: '.html' }, script: { key: 'content', ext: '.js' } };
 
-const isExtraKey = key => /^(regex|script):/.test(key) || key === 'vars' || key === 'xbtasks';
+const isExtraKey = key => /^(regex|script):/.test(key) || key === 'vars' || key === 'xbtasks' || key === 'xbtemplate' || key === 'xbvars';
 const extraKind = key => key.startsWith('regex:') ? 'regex' : key.startsWith('script:') ? 'script' : key;
 // 同步槽位名：有 id 用 id，没有时用名字
 const itemKey = (kind, v) => kind === 'regex' ? `regex:${v?.id ?? v?.scriptName ?? ''}`
   : kind === 'script' ? `script:${v?.id ?? v?.name ?? ''}` : kind;
 const itemLabel = (kind, v, i = 0) => kind === 'regex' ? String(v?.scriptName || `正则 ${i + 1}`)
-  : kind === 'script' ? String(v?.name || `脚本 ${i + 1}`) : kind === 'vars' ? '角色变量' : '小白X 任务';
+  : kind === 'script' ? String(v?.name || `脚本 ${i + 1}`)
+  : kind === 'vars' ? '角色变量'
+  : kind === 'xbtemplate' ? '小白X 模板'
+  : kind === 'xbvars' ? '小白X 变量'
+  : '小白X 任务';
 
 const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
 const isThTuple = v => Array.isArray(v) && v.every(it => Array.isArray(it) && typeof it[0] === 'string');
 const varsPresent = v => isObj(v) && Object.keys(v).length > 0;
 const xbPresent = v => isObj(v) && (Array.isArray(v.tasks) ? v.tasks.length > 0 : Object.keys(v).length > 0);
-const xbTemplatePresent = v => isObj(v) && (v.enabled === true || Boolean(v.template));
+const xbTemplatePresent = v => isObj(v) && (v.enabled === true || Boolean(v.template) || Boolean(v.htmlTemplate));
 const lwbPresent = v => isObj(v) && Object.keys(v).length > 0;
 
 // 统一读取酒馆助手的 3 种存储形态：
@@ -8942,6 +8953,8 @@ function listExtras(card) {
   });
   if (varsPresent(th.variables)) items.push({ key: 'vars', kind: 'vars', index: 0, label: '角色变量', disabled: false, value: th.variables });
   if (xbPresent(x['xiaobaix-tasks'])) items.push({ key: 'xbtasks', kind: 'xbtasks', index: 0, label: '小白X 任务', disabled: false, value: x['xiaobaix-tasks'] });
+  if (xbTemplatePresent(x['xiaobaix-template'])) items.push({ key: 'xbtemplate', kind: 'xbtemplate', index: 0, label: '小白X 模板', disabled: x['xiaobaix-template']?.enabled === false, value: x['xiaobaix-template'] });
+  if (lwbPresent(x.LittleWhiteBox)) items.push({ key: 'xbvars', kind: 'xbvars', index: 0, label: '小白X 变量', disabled: false, value: x.LittleWhiteBox });
   return items;
 }
 // 默认全拆（前端卡的手机版状态栏、离线版美化等常以 disabled: true 存放在卡内供切换，若留在 card.md 会把数百 KB 的 HTML 塞进 YAML）
@@ -8988,6 +9001,8 @@ function keptExtensions(ext, keep) {
     x.TavernHelper_scripts = filterList(x.TavernHelper_scripts, 'script').left;
   }
   if (xbPresent(x['xiaobaix-tasks']) && !keep.has('xbtasks')) delete x['xiaobaix-tasks'];
+  if (xbTemplatePresent(x['xiaobaix-template']) && !keep.has('xbtemplate')) delete x['xiaobaix-template'];
+  if (lwbPresent(x.LittleWhiteBox) && !keep.has('xbvars')) delete x.LittleWhiteBox;
   return x;
 }
 
@@ -9000,6 +9015,16 @@ function extraFiles(kind, value, base) {
   const json = v => JSON.stringify(v, null, 2) + '\n';
   if (kind === 'vars') return { [VARS_FILE]: json(value) };
   if (kind === 'xbtasks') return { [XB_FILE]: json(value) };
+  if (kind === 'xbvars') return { [XB_VARS_FILE]: json(value) };
+  if (kind === 'xbtemplate') {
+    const htmlKey = isObj(value) && typeof value.template === 'string' ? 'template'
+      : (isObj(value) && typeof value.htmlTemplate === 'string' ? 'htmlTemplate' : null);
+    if (htmlKey && value[htmlKey].length > 0) {
+      const { [htmlKey]: html, ...rest } = value;
+      return { [XB_TPL_JSON]: json(rest), [XB_TPL_HTML]: html };
+    }
+    return { [XB_TPL_JSON]: json(value) };
+  }
   const side = SIDE[kind];
   if (isObj(value) && typeof value[side.key] === 'string' && (kind !== 'regex' || value[side.key].length > 0)) {
     const { [side.key]: text, ...rest } = value;
@@ -9015,9 +9040,11 @@ async function readJsonFile(root, rel) {
 }
 const exists = async file => { try { await fs.access(file); return true; } catch (e) { if (e.code === 'ENOENT') return false; throw e; } };
 
+const SINGLETON_FILES = new Set([VARS_FILE, XB_FILE, XB_TPL_JSON, XB_TPL_HTML, XB_VARS_FILE]);
+
 // 读工程里的拆分文件
 async function readExtras(root) {
-  const out = { regex: [], scripts: [], vars: null, xbtasks: null };
+  const out = { regex: [], scripts: [], vars: null, xbtasks: null, xbtemplate: null, xbvars: null };
   for (const kind of ['regex', 'script']) {
     const dir = KIND_DIR[kind], side = SIDE[kind];
     let names;
@@ -9025,7 +9052,7 @@ async function readExtras(root) {
     const groups = new Map();
     for (const name of names.sort()) {
       const rel = `${dir}/${name}`;
-      if (rel === VARS_FILE || rel === XB_FILE || name.startsWith('.')) continue;
+      if (SINGLETON_FILES.has(rel) || name.startsWith('.')) continue;
       const ext = path.extname(name);
       if (ext !== '.json' && ext !== side.ext) continue;
       const base = rel.slice(0, -ext.length);
@@ -9044,6 +9071,14 @@ async function readExtras(root) {
   }
   if (await exists(path.join(root, VARS_FILE))) out.vars = { files: [VARS_FILE], value: await readJsonFile(root, VARS_FILE) };
   if (await exists(path.join(root, XB_FILE))) out.xbtasks = { files: [XB_FILE], value: await readJsonFile(root, XB_FILE) };
+  const hasTplJson = await exists(path.join(root, XB_TPL_JSON));
+  const hasTplHtml = await exists(path.join(root, XB_TPL_HTML));
+  if (hasTplJson || hasTplHtml) {
+    const settings = hasTplJson ? await readJsonFile(root, XB_TPL_JSON) : { enabled: true };
+    if (hasTplHtml && isObj(settings)) settings.template = noBom(await fs.readFile(path.join(root, XB_TPL_HTML), 'utf8'));
+    out.xbtemplate = { files: [hasTplJson ? XB_TPL_JSON : null, hasTplHtml ? XB_TPL_HTML : null].filter(Boolean), value: settings };
+  }
+  if (await exists(path.join(root, XB_VARS_FILE))) out.xbvars = { files: [XB_VARS_FILE], value: await readJsonFile(root, XB_VARS_FILE) };
   return out;
 }
 
@@ -9062,7 +9097,7 @@ function mergeOrdered(fileItems, kept) {
 // 装配：把拆分文件合回卡的 extensions（card.md 里的设置已先盖上）
 function applyExtras(data, extras) {
   if (!extras) return data;
-  const has = extras.regex.length || extras.scripts.length || extras.vars || extras.xbtasks;
+  const has = extras.regex.length || extras.scripts.length || extras.vars || extras.xbtasks || extras.xbtemplate || extras.xbvars;
   if (!has) return data;
   const x = data.extensions = { ...(data.extensions ?? {}) };
   if (extras.regex.length) x.regex_scripts = mergeOrdered(extras.regex, Array.isArray(x.regex_scripts) ? x.regex_scripts : []);
@@ -9089,6 +9124,8 @@ function applyExtras(data, extras) {
     }
   }
   if (extras.xbtasks) x['xiaobaix-tasks'] = extras.xbtasks.value;
+  if (extras.xbtemplate) x['xiaobaix-template'] = extras.xbtemplate.value;
+  if (extras.xbvars) x.LittleWhiteBox = extras.xbvars.value;
   return data;
 }
 
@@ -9097,6 +9134,8 @@ function setKeptItem(ext, key, value) {
   const x = isObj(ext) ? structuredClone(ext) : {};
   const kind = extraKind(key);
   if (kind === 'xbtasks') { x['xiaobaix-tasks'] = value ?? { tasks: [] }; return x; }
+  if (kind === 'xbtemplate') { x['xiaobaix-template'] = value ?? { enabled: false, template: '' }; return x; }
+  if (kind === 'xbvars') { x.LittleWhiteBox = value ?? {}; return x; }
   const th = () => (x.tavern_helper = isObj(x.tavern_helper) ? x.tavern_helper : {});
   if (kind === 'vars') { th().variables = value ?? {}; return x; }
   const list = kind === 'regex' ? (x.regex_scripts = Array.isArray(x.regex_scripts) ? x.regex_scripts : [])
@@ -9127,7 +9166,7 @@ function detectFrameworks(card, extraText = '') {
   return out;
 }
 
-return { readExtras, VARS_FILE, XB_FILE, EXTRA_DIRS, isExtraKey, extraKind, itemKey, itemLabel, listExtras, defaultKeep, stripExtras, keptExtensions, extraBase, extraFiles, mergeOrdered, applyExtras, setKeptItem, detectFrameworks };
+return { readExtras, VARS_FILE, XB_FILE, XB_TPL_JSON, XB_TPL_HTML, XB_VARS_FILE, EXTRA_DIRS, isExtraKey, extraKind, itemKey, itemLabel, listExtras, defaultKeep, stripExtras, keptExtensions, extraBase, extraFiles, mergeOrdered, applyExtras, setKeptItem, detectFrameworks };
 })();
 
 const __mod_nodes = (() => {
@@ -9175,9 +9214,11 @@ function quoteBarePosition(fmText) {
 //   card.md                    卡根
 //   <字段>.md                  单槽字段（description.md 等），字段为空就不生成
 //   message/<n>.md             0 = first_mes，1 起 = 备选开场白
-//   world_book/**/<条目>.md    世界书条目，可以建子文件夹分组
+//   lorebooks/**/<条目>.md     世界书条目（向下兼容旧目录名 world_book/ 与 lorebook/），可以建子文件夹分组
 // 其余文件（调研.md、记录/、候选/ 等）不参与装配。
-const LAYOUT = { card: 'card.md', message: 'message', book: 'world_book', regex: 'regex', scripts: 'scripts', cover: 'character.png' };
+const LAYOUT = { card: 'card.md', message: 'message', book: 'lorebooks', regex: 'regex', scripts: 'scripts', cover: 'character.png' };
+const BOOK_DIRS = new Set(['lorebooks', 'lorebook', 'world_book']);
+const isBookDir = name => BOOK_DIRS.has(name);
 const FIELD_FILES = {
   description: 'character', personality: 'character', scenario: 'world',
   mes_example: 'corpus', system_prompt: 'output', post_history_instructions: 'output',
@@ -9200,8 +9241,8 @@ function implied(rel) {
       ? { id: 'fld-first_mes', type: 'greeting', target: 'first_mes', title: '开场白' }
       : { id: `greet-alt-${String(n).padStart(2, '0')}`, type: 'greeting', target: 'alternate_greetings', title: `备选${String(n).padStart(2, '0')}`, order: n };
   }
-  // 放在 world_book/ 下就是世界书条目：去处由位置定，类型只管排序分组和标签检查
-  if (parts[0] === LAYOUT.book) return { id: `wb-${parts.slice(1).join('/').replace(/\.md$/, '')}`, type: 'lore', target: 'character_book', title: stem };
+  // 放在 lorebooks/（或旧版 world_book/）下就是世界书条目：去处由位置定，类型只管排序分组和标签检查
+  if (isBookDir(parts[0])) return { id: `wb-${parts.slice(1).join('/').replace(/\.md$/, '')}`, type: 'lore', target: 'character_book', title: stem };
   return null;
 }
 
@@ -9214,7 +9255,7 @@ async function* walk(root, dir = root) {
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
       const top = rel.split(/[\\/]/)[0];
-      if (top === LAYOUT.book || (top === LAYOUT.message && rel === LAYOUT.message)) yield* walk(root, full);
+      if (isBookDir(top) || (top === LAYOUT.message && rel === LAYOUT.message)) yield* walk(root, full);
     } else if (e.isFile() && e.name.endsWith('.md')) {
       const defaults = implied(rel);
       if (defaults) yield { file: full, rel, defaults };
@@ -9249,27 +9290,28 @@ function parseNodeFile(raw, relPath) {
     rest = raw.slice(fmMatch[0].length);
   }
 
-  // body 标记：恰好一次
+  // 标准 Frontmatter 格式直接以第二个 --- 之后的内容作为正文；
+  // 若旧文件包含 <!-- body --> 标记，则向下兼容按 <!-- body --> 分割（出现多次仍报 P2）。
   const markCount = rest.split(BODY_MARK).length - 1;
   let body = '';
   if (markCount === 0) {
-    problems.push({ rule: 'P1', message: `缺少正文边界标记 ${BODY_MARK}（旧节点请人工补标记，工具不猜）` });
+    const trimmed = rest.replaceAll('\r\n', '\n').replace(/^\s+/, '').replace(/\s+$/, '');
+    body = trimmed ? `${trimmed}\n` : '';
   } else if (markCount > 1) {
     problems.push({ rule: 'P2', message: `正文边界标记出现 ${markCount} 次，只能有一次` });
   } else {
     body = rest.slice(rest.indexOf(BODY_MARK) + BODY_MARK.length)
-    .replaceAll('\r\n', '\n')
-    .replace(/^\s+/, '')
-    .replace(/\s+$/, '') + '\n';
+      .replaceAll('\r\n', '\n')
+      .replace(/^\s+/, '')
+      .replace(/\s+$/, '') + '\n';
   }
 
-  // 状态只从工序段（body 标记之前）提取，正文里出现「状态」二字不算
-  const head = markCount >= 1 ? rest.slice(0, rest.indexOf(BODY_MARK)) : rest;
+  // 状态与确认方式：旧文件从工序段（body 标记之前）或 frontmatter 提取
+  const head = markCount >= 1 ? rest.slice(0, rest.indexOf(BODY_MARK)) : '';
   const sm = head.match(/^\s*-\s*状态[：:]\s*(\S+)/m);
-  const status = sm ? sm[1] : null;
-  // 确认方式：作者确认 / 作者委托（……），同样只从工序段取
+  const status = sm ? sm[1] : (typeof frontmatter.status === 'string' ? frontmatter.status : null);
   const cm = head.match(/^\s*-\s*确认方式[：:]\s*(.+?)\s*$/m);
-  const confirm = cm ? cm[1] : null;
+  const confirm = cm ? cm[1] : (typeof frontmatter.confirm === 'string' ? frontmatter.confirm : null);
 
   return { frontmatter, body, problems, status, confirm, loose: false };
 }
@@ -9404,7 +9446,7 @@ function assignOrders(bookNodes) {
   const sorted = [...tree].sort((a, b) => orders.get(a) - orders.get(b) || rank.get(a) - rank.get(b));
   return { sorted, orders, width };
 }
-return { scanCard, BODY_MARK, SKIP_DIRS, LEGACY_NODE_DIRS, isKnownType, KNOWN_TYPE_LIST, parsePosition, quoteBarePosition, LAYOUT, FIELD_FILES, parseNodeFile, defaultTarget, bookNodesOf, ORDER_GROUP, orderGroupOf, compareTree, orderWidth, assignOrders };
+return { scanCard, BODY_MARK, SKIP_DIRS, LEGACY_NODE_DIRS, isKnownType, KNOWN_TYPE_LIST, parsePosition, quoteBarePosition, LAYOUT, BOOK_DIRS, isBookDir, FIELD_FILES, parseNodeFile, defaultTarget, bookNodesOf, ORDER_GROUP, orderGroupOf, compareTree, orderWidth, assignOrders };
 })();
 
 const __mod_protocol = (() => {
@@ -9637,6 +9679,54 @@ function validateNodes(scan) {
     }
   }
 
+  // P25 常驻层防递归与下位绿灯触发词泄漏检查
+  {
+    for (const n of book) {
+      if (!n.constant || n.frontmatter?.enabled === false) continue;
+      const fm = n.frontmatter ?? {};
+      const tavExt = fm.tavern?.extensions ?? {};
+      const preventRec = typeof fm.prevent_recursion === 'boolean'
+        ? fm.prevent_recursion
+        : (typeof tavExt.prevent_recursion === 'boolean' ? tavExt.prevent_recursion : !n.recursion);
+      if (!preventRec) {
+        push(warnings, n, 'P25', '常驻条目未开启 prevent_recursion: true：常驻正文参与递归扫描时会连锁引爆绿灯条目，请设 prevent_recursion: true（或删掉 recursion: true）');
+      }
+    }
+    const greenKeys = [];
+    for (const b of book) {
+      if (b.constant || b.frontmatter?.enabled === false) continue;
+      for (const rawKey of b.keys ?? []) {
+        const k = String(rawKey).trim();
+        if (!k || k.length < 2 || (k.startsWith('/') && k.endsWith('/')) || k.startsWith('占位')) continue;
+        greenKeys.push({ key: k, owner: b.relPath });
+      }
+    }
+    if (greenKeys.length > 0) {
+      const alwaysOnNodes = scan.nodes.filter(n => {
+        if (n.type === 'card' || n.type === 'note' || n.frontmatter?.enabled === false || !n.body?.trim()) return false;
+        const t = defaultTarget(n, scan);
+        if (t === 'description' || t === 'system_prompt') return true;
+        return t === 'character_book' && n.constant === true;
+      });
+      for (const c of alwaysOnNodes) {
+        const hitKeys = new Set();
+        const hitOwners = new Set();
+        for (const { key, owner } of greenKeys) {
+          if (owner === c.relPath) continue;
+          if (c.body.includes(key)) {
+            hitKeys.add(key);
+            hitOwners.add(owner);
+          }
+        }
+        if (hitKeys.size > 0) {
+          const sampleKeys = [...hitKeys].slice(0, 8).map(k => `「${k}」`).join('、') + (hitKeys.size > 8 ? `等 ${hitKeys.size} 个词` : '');
+          const sampleOwners = [...hitOwners].slice(0, 4).join('、') + (hitOwners.size > 4 ? `等 ${hitOwners.size} 条` : '');
+          push(warnings, c, 'P25', `常驻层正文包含下位绿灯条目（${sampleOwners}）的触发词 ${sampleKeys}：会导致每轮误触发或污染未登场角色，请先用上位泛用词替换后再移除具体专名`);
+        }
+      }
+    }
+  }
+
   // P21 编号保留不用：world_book/ 下可以建子文件夹分组，装配不看目录，不再报嵌套
 
   // P10 卡根数量与旧版节点树拦截（缺失 card.md 或仍为未迁移的旧版节点树时必须报 error 阻断构建）
@@ -9714,10 +9804,13 @@ function entryShape(n) {
   } else {
     const t = String(title);
     if (/[\\/]/.test(t)) add('P18', `title「${t}」里有路径分隔符：标题写给人看的名字，不写路径`);
-    // P18f 当文件名不带数字排序前缀（如 01-、01b-）且与 title 完全不同时，提醒改文件名要同步改 title
+    // P18f 当文件名不带数字排序前缀（如 01-、01b-）且与 title 完全不同时，提醒改文件名要同步改 title；同时检查非角色条目的冗余类型前缀
     const cleanStem = String(n.stem ?? '').replace(/^\d+[a-z]?[-_.·\s]+/i, '').trim();
     if (cleanStem && t.trim() && cleanStem !== t.trim() && !t.includes(cleanStem) && !cleanStem.includes(t.trim())) {
       add('P18f', `文件名「${n.stem}」与 title「${t}」不一致：酒馆世界书列表以 title 为准，若想修改酒馆里的条目名请同步修改 title`);
+    }
+    if (n.type !== 'character' && /^(?:世界|法则|规则|生态|器物|道具|地点|文风|输出|历史)\s*[·•·]\s*\S/.test(t.trim())) {
+      add('P18f', `title「${t}」带有冗余分类前缀：非角色条目请直接写自然名称，去掉「世界 · / 法则 · / 文风 · 」等类型前缀`);
     }
   }
   return { problems, blocks };
@@ -10177,9 +10270,13 @@ function safeDirName(s, used = new Set()) {
   return name;
 }
 
-function nodeText(fm, body, source) {
+function nodeText(fm, body) {
+  if (!fm || Object.keys(fm).length === 0) {
+    return `${body}${body.endsWith('\n') ? '' : '\n'}`;
+  }
   const head = YAML.stringify(fm, { lineWidth: 0 }).trimEnd();
-  return `---\n${head}\n---\n\n## 工序\n- 来源：${source}\n- 状态：草稿\n\n${BODY_MARK}\n${body}\n`;
+  if (!body) return `---\n${head}\n---\n`;
+  return `---\n${head}\n---\n\n${body}${body.endsWith('\n') ? '' : '\n'}`;
 }
 
 // 条目 → frontmatter（只写节点协议已有的字段；其余差异第二遍补进 tavern）
@@ -10294,21 +10391,21 @@ async function unpackCmd(file, opts = {}) {
   if (d.creator_notes) cardFm.creator_notes = String(d.creator_notes);
   files.set('card.md', { fm: cardFm, body: '' });
 
-  // 单槽字段
+  // 单槽字段：直接生成纯正文（零 YAML 头、零 <!-- body -->）
   for (const [field, spec] of Object.entries(FIELD_NODES)) {
     const text = String(d[field] ?? '');
     if (!text) continue;
     if (!bodyRoundTrips(text)) notes.push(`${field}：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
-    files.set(spec.file, { fm: { id: `fld-${field}`, type: spec.type, target: field, title: field === 'first_mes' ? '开场白' : field }, body: text });
+    files.set(spec.file, { fm: null, body: text });
   }
   (d.alternate_greetings ?? []).forEach((g, i) => {
     const text = String(g ?? '');
     const num = String(i + 1).padStart(2, '0');
     if (!bodyRoundTrips(text)) notes.push(`备选开场白 ${num}：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
-    files.set(`message/${i + 1}.md`, { fm: { id: `greet-alt-${num}`, type: 'greeting', target: 'alternate_greetings', title: `备选${num}`, order: i + 1 }, body: text });
+    files.set(`message/${i + 1}.md`, { fm: null, body: text });
   });
 
-  // 世界书条目：拆的时候分不出类型，先记 lore；一条一个 world_book/<条目名>.md
+  // 世界书条目：拆的时候分不出类型，先记 lore；一条一个 lorebooks/<条目名>.md
   const entries = d.character_book?.entries ?? [];
   const used = new Set();
   const usedNodeIds = new Set();
@@ -10324,7 +10421,7 @@ async function unpackCmd(file, opts = {}) {
     let nodeId = `wb-${e.id ?? i}`;
     for (let suffix = 2; usedNodeIds.has(nodeId); suffix++) nodeId = `wb-${e.id ?? i}-${suffix}`;
     usedNodeIds.add(nodeId);
-    const rel = `world_book/${safeDirName(e.comment || nodeId, used)}.md`;
+    const rel = `lorebooks/${safeDirName(e.comment || nodeId, used)}.md`;
     const text = String(e.content ?? '');
     if (!bodyRoundTrips(text)) notes.push(`条目「${e.comment}」：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
     files.set(rel, { fm: entryFrontmatter(e, nodeId), body: text });
@@ -10406,14 +10503,14 @@ async function unpackCmd(file, opts = {}) {
   const added = [], wsOnly = [];
   const diffs = diffPaths(normalizeCard(card), normalizeCard(built), '', [], added, wsOnly);
 
-  const withOv = [...files.values()].filter(f => f.fm.tavern && f.fm.type !== 'card').length;
+  const withOv = [...files.values()].filter(f => f.fm?.tavern && f.fm?.type !== 'card').length;
   const lines = [];
   lines.push(`unpack：${file}${bookOnly ? `（独立世界书「${bookOnly}」，卡根只记世界书名；推送、拉回用 tt-card 的 --book）` : ''}`);
   lines.push(`输出：${out}`);
   lines.push(`节点：${files.size} 个（世界书条目 ${entries.length}、备选开场白 ${(d.alternate_greetings ?? []).length}、单槽字段 ${Object.values(FIELD_NODES).filter(s => files.has(s.file)).length}、卡根 1）`);
   lines.push(`带 tavern 段的条目：${withOv} 个；卡根 tavern 段：${Object.keys(cardOv).join('、') || '无'}`);
   if (extraItems.length) lines.push(`正则/脚本/变量：共 ${extraItems.length} 项，拆成文件 ${extraItems.filter(i => !keep.has(i.key)).length} 项，留在 card.md ${extraItems.filter(i => keep.has(i.key)).length} 项`);
-  lines.push('条目类型一律先记为 lore、放在 world_book/，类型待人工调整；order 原样保留，所以改类型不影响顺序。');
+  lines.push('条目类型一律先记为 lore、放在 lorebooks/，类型待人工调整；order 原样保留，所以改类型不影响顺序。');
   if (added.length) lines.push(`原卡没有、装配时补上酒馆默认值的键：${[...new Set(added)].join('、')}`);
   for (const n of notes) if (!n.includes('正文首尾有空白')) lines.push(`注意：${n}`);
   const wsNotes = notes.filter(n => n.includes('正文首尾有空白'));
@@ -10461,10 +10558,13 @@ const extrasLib = __mod_extras;
 // 键名排序后的 JSON：正则、脚本等整项比对，键顺序不算差异
 const sortKeys = o => Array.isArray(o) ? o.map(sortKeys) : (o && typeof o === 'object') ? Object.fromEntries(Object.keys(o).sort().map(k => [k, sortKeys(o[k])])) : o;
 const stableJson = v => JSON.stringify(sortKeys(v), null, 2);
-// 可拆项槽位：regex:<id>、script:<id>、vars、xbtasks，值是整项 JSON
+// 可拆项槽位：regex:<id>、script:<id>、vars、xbtasks、xbtemplate、xbvars，值是整项 JSON
 function extraSlots(card) {
   const slots = {};
-  for (const item of extrasLib.listExtras(card)) slots[item.key] = { value: stableJson(item.value), label: `${{ regex: '正则', script: '脚本', vars: '', xbtasks: '' }[item.kind]}${item.kind === 'vars' || item.kind === 'xbtasks' ? '' : '：'}${item.label}`, extraKind: item.kind, extraIndex: item.index };
+  for (const item of extrasLib.listExtras(card)) {
+    const prefix = { regex: '正则', script: '脚本', vars: '', xbtasks: '', xbtemplate: '', xbvars: '' }[item.kind] ?? '';
+    slots[item.key] = { value: stableJson(item.value), label: `${prefix}${prefix ? '：' : ''}${item.label}`, extraKind: item.kind, extraIndex: item.index };
+  }
   return slots;
 }
 const extraOrder = card => extrasLib.listExtras(card).map(i => i.key);
@@ -10509,11 +10609,13 @@ function attachNodeSettings(nodeSlots, assembledCard, scan = null) {
       s.displayIndex = i;
     }
   }
-  const ex = scan?.extras ?? { regex: [], scripts: [], vars: null, xbtasks: null };
+  const ex = scan?.extras ?? { regex: [], scripts: [], vars: null, xbtasks: null, xbtemplate: null, xbvars: null };
   const fileOf = new Map([...ex.regex, ...ex.scripts].map(f => [f.key, f]));
   const fileByPos = new Map([...ex.regex, ...ex.scripts].map(f => [`${f.kind}:${f.n}`, f]));
   if (ex.vars) fileOf.set('vars', { ...ex.vars, base: null });
   if (ex.xbtasks) fileOf.set('xbtasks', { ...ex.xbtasks, base: null });
+  if (ex.xbtemplate) fileOf.set('xbtemplate', { ...ex.xbtemplate, base: null });
+  if (ex.xbvars) fileOf.set('xbvars', { ...ex.xbvars, base: null });
   for (const [key, slot] of Object.entries(extraSlots(assembledCard))) {
     const f = (slot.extraIndex !== undefined ? fileByPos.get(`${slot.extraKind}:${slot.extraIndex + 1}`) : null) ?? fileOf.get(key);
     nodeSlots.slots[key] = f ? { ...slot, relPath: f.files[0], files: f.files, base: f.base } : { ...slot, relPath: 'card.md', kept: true };
@@ -10652,14 +10754,14 @@ const targetOccupied = (record, target) => reservedTargets(record).includes(targ
 // 工作区布局：cards/<卡名>/ 一张卡一个文件夹；cards/backups/ 是旧版备份目录，不是工程
 const BACKUPS_DIR = 'backups';
 const INTERNAL_SUBDIRS = new Set([
-  'backups', 'dist', 'world_book', 'message', 'regex', 'scripts', 'note',
+  'backups', 'dist', 'lorebooks', 'lorebook', 'world_book', 'message', 'regex', 'scripts', 'note',
   '记录', '候选', '待归位',
   'world', 'character', 'greeting', 'output', 'style', 'archive', 'export', 'logs', 'tools',
 ]);
 function isSingleCardDirectory(dir) {
   if (!dir || !fs.existsSync(dir)) return false;
   if (fs.existsSync(path.join(dir, 'card.md')) || fs.existsSync(path.join(dir, 'index.md')) || fs.existsSync(path.join(dir, '.card-forge'))) return true;
-  if (fs.existsSync(path.join(dir, 'world_book')) || fs.existsSync(path.join(dir, 'message'))) return true;
+  if (fs.existsSync(path.join(dir, 'lorebooks')) || fs.existsSync(path.join(dir, 'lorebook')) || fs.existsSync(path.join(dir, 'world_book')) || fs.existsSync(path.join(dir, 'message'))) return true;
   if (fs.existsSync(path.join(dir, 'world')) && fs.existsSync(path.join(dir, 'character'))) return true;
   return false;
 }
@@ -10721,7 +10823,7 @@ const __mod_world_ids = (() => {
 // Read-only ID planning.
 const { fail, hashObject } = __mod_safety;
 
-const isWorldEntryPath = rel => /^world_book\/(?:[^/]+\/)*[^/]+\.md$/.test(rel.replaceAll('\\', '/'));
+const isWorldEntryPath = rel => /^(?:lorebooks?|world_book)\/(?:[^/]+\/)*[^/]+\.md$/.test(rel.replaceAll('\\', '/'));
 const entryUid = (node, fp) => node.frontmatter?.tavern?.id ?? fp.fnv1a(node.id);
 // 文件里没写 id：按文件位置推出的 id 会随改名变，同步时补一个固定 id
 const missingId = node => node.idImplied === true || node.id === null || node.id === undefined || node.id === '';
@@ -10730,8 +10832,8 @@ const reliableBaseline = (saved, cardFile) => saved?.cardFile === cardFile && !!
 function insertId(raw, id, lib, YAML) {
   const match = raw.match(/^(\uFEFF?---\r?\n)([\s\S]*?)(\r?\n---(?:\r?\n|$))/);
   const eol = raw.includes('\r\n') ? '\r\n' : '\n';
-  // 没有开头设置的散文件：补上只含 id 的开头和正文标记，正文原样保留
-  if (!match) return `---${eol}${YAML.stringify({ id }).trimEnd()}${eol}---${eol}${eol}<!-- body -->${eol}${raw.replace(/^\uFEFF/, '')}`;
+  // 没有开头设置的散文件：补上只含 id 的标准 frontmatter，正文原样保留
+  if (!match) return `---${eol}${YAML.stringify({ id }).trimEnd()}${eol}---${eol}${eol}${raw.replace(/^\uFEFF/, '')}`;
   const doc = YAML.parseDocument(lib.quoteBarePosition(match[2]));
   if (doc.errors.length || !YAML.isMap(doc.contents)) fail('INVALID_PROJECT', 'frontmatter 不是有效键值表，不能补 id');
   let frontmatter;
@@ -10813,7 +10915,7 @@ function compareSnapshot(snapshot) {
     const remoteNewEntry = !n && !!t && (key.startsWith('entry:') || key.startsWith('greeting:')) && unrecorded;
     const deletedOn = (side, kept) => snapshot.baselineReliable === true && key.startsWith('entry:') && baseline.slots[key] === slotHash(kept.value);
     // 正则、脚本、变量：一边没有时按基线判断是哪边新增、哪边删除
-    const extra = /^(regex|script):|^(vars|xbtasks)$/.test(key);
+    const extra = /^(regex|script):|^(vars|xbtasks|xbtemplate|xbvars)$/.test(key);
     const base0 = baseline?.slots?.[key];
     if (extra && (!n || !t)) {
       const has = n ?? t;
@@ -11187,32 +11289,32 @@ class FileSyncAdapter {
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `字段文件已存在：${rel}`);
         planned[rel] = value.replaceAll('\n', '\n') + '\n'; newFiles.add(rel); continue;
       }
-      // 酒馆里新建的备选开场白：生成 message/<序号>.md
+      // 酒馆里新建的备选开场白：生成 message/<序号>.md（纯正文）
       if (!rel && key.startsWith('greeting:')) {
         const idx = Number(key.slice('greeting:'.length)) + 1;
-        const num = String(idx).padStart(2, '0');
         rel = `message/${idx}.md`;
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `开场白文件已存在：${rel}`);
-        const { unpack } = await this.libraries();
-        const fm = { id: `greet-alt-${num}`, type: 'greeting', target: 'alternate_greetings', title: `备选${num}`, order: idx };
-        planned[rel] = unpack.nodeText(fm, value, '酒馆实时同步');
+        planned[rel] = value.replaceAll('\n', '\n') + '\n';
         newFiles.add(rel);
         continue;
       }
-      // 酒馆里新建的世界书条目：生成 world_book/<标题>.md
+      // 酒馆里新建的世界书条目：优先沿用工程里已有的世界书目录（lorebooks / lorebook / world_book），默认 lorebooks/<标题>.md
       if (!rel && key.startsWith('entry:') && remoteEntry) {
         const { unpack } = await this.libraries();
+        const existingBookDir = ['lorebooks', 'lorebook', 'world_book'].find(d =>
+          Object.keys(planned).some(r => r.startsWith(`${d}/`)) || fs.existsSync(path.join(project.dir, d))
+        ) ?? 'lorebooks';
         const usedNames = new Set(
           Object.keys(planned)
-            .filter(r => r.startsWith('world_book/') && r.endsWith('.md'))
+            .filter(r => /^(?:lorebooks?|world_book)\//.test(r) && r.endsWith('.md'))
             .map(r => path.basename(r, '.md').toLowerCase())
         );
         const stem = unpack.safeDirName(remoteEntry.comment || `wb-${remoteEntry.id}`, usedNames);
-        rel = `world_book/${stem}.md`;
+        rel = `${existingBookDir}/${stem}.md`;
         if (planned[rel] !== undefined || fs.existsSync(contained(project.dir, rel))) fail('STALE_PREVIEW', `世界书条目文件已存在：${rel}`);
         const nodeId = `wb-${remoteEntry.id}`;
         const fm = unpack.buildEntryFrontmatter(remoteEntry, nodeId, { existingType: 'lore', displayIndex: remoteEntry.extensions?.display_index ?? -1 });
-        planned[rel] = unpack.nodeText(fm, value, '酒馆实时同步');
+        planned[rel] = unpack.nodeText(fm, value);
         newFiles.add(rel);
         continue;
       }
@@ -11238,10 +11340,18 @@ class FileSyncAdapter {
           raw = `${hasBom ? '\uFEFF' : ''}---${eol}${head}${eol}---${clean.slice(fmMatch[0].length)}`;
         }
       }
-      const at = raw.indexOf(BODY);
-      if (at < 0 || raw.indexOf(BODY, at + BODY.length) >= 0 || value.includes(BODY)) fail('INVALID_BODY', `正文标记不唯一：${rel}`, 422);
       const eol = raw.includes('\r\n') ? '\r\n' : '\n';
-      planned[rel] = raw.slice(0, at + BODY.length) + eol + value.replaceAll('\n', eol) + eol;
+      const at = raw.indexOf(BODY);
+      if (at >= 0) {
+        if (raw.indexOf(BODY, at + BODY.length) >= 0 || value.includes(BODY)) fail('INVALID_BODY', `正文标记不唯一：${rel}`, 422);
+        planned[rel] = raw.slice(0, at + BODY.length) + eol + value.replaceAll('\n', eol) + eol;
+      } else {
+        const hasBom = raw.charCodeAt(0) === 0xfeff;
+        const clean = hasBom ? raw.slice(1) : raw;
+        const fmMatch = clean.match(/^---\r?\n[\s\S]*?\r?\n---/);
+        if (!fmMatch) fail('INVALID_BODY', `frontmatter 格式错误：${rel}`, 422);
+        planned[rel] = `${hasBom ? '\uFEFF' : ''}${fmMatch[0]}${eol}${eol}${value.replaceAll('\n', eol)}${eol}`;
+      }
     }
     for (const rel of deleted) {
       const file = contained(project.dir, rel);
@@ -11290,10 +11400,12 @@ class FileSyncAdapter {
     const worldOnly = project.cardFile.startsWith('world:');
     const card = worldOnly ? null : structuredClone(snapshot.card);
     if (card) {
-      // 酒馆合并写入时对象里的键不会被删掉：工程里删掉的角色变量、小白X任务写成空值
+      // 酒馆合并写入时对象里的键不会被删掉：工程里删掉的角色变量、小白X任务/模板/变量写成空值
       const x = (card.data.extensions ??= {});
       if (snapshot.tavern.slots.vars && !snapshot.nodes.slots.vars) (x.tavern_helper ??= {}).variables = {};
       if (snapshot.tavern.slots.xbtasks && !snapshot.nodes.slots.xbtasks) x['xiaobaix-tasks'] = { tasks: [] };
+      if (snapshot.tavern.slots.xbtemplate && !snapshot.nodes.slots.xbtemplate) x['xiaobaix-template'] = { enabled: false, template: '' };
+      if (snapshot.tavern.slots.xbvars && !snapshot.nodes.slots.xbvars) x.LittleWhiteBox = {};
       // 数组是整体替换；工程里一条都不剩时要显式写空数组，否则酒馆里的旧内容会留着
       const has = p => Object.keys(snapshot.nodes.slots).some(k => k.startsWith(p)), had = p => Object.keys(snapshot.tavern.slots).some(k => k.startsWith(p));
       if (had('regex:') && !has('regex:')) x.regex_scripts = [];

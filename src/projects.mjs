@@ -9,14 +9,14 @@ export const targetOccupied = (record, target) => reservedTargets(record).includ
 // 工作区布局：cards/<卡名>/ 一张卡一个文件夹；cards/backups/ 是旧版备份目录，不是工程
 export const BACKUPS_DIR = 'backups';
 export const INTERNAL_SUBDIRS = new Set([
-  'backups', 'dist', 'world_book', 'message', 'regex', 'scripts', 'note',
+  'backups', 'dist', 'lorebooks', 'lorebook', 'world_book', 'message', 'regex', 'scripts', 'note',
   '记录', '候选', '待归位',
   'world', 'character', 'greeting', 'output', 'style', 'archive', 'export', 'logs', 'tools',
 ]);
 export function isSingleCardDirectory(dir) {
   if (!dir || !fs.existsSync(dir)) return false;
   if (fs.existsSync(path.join(dir, 'card.md')) || fs.existsSync(path.join(dir, 'index.md')) || fs.existsSync(path.join(dir, '.card-forge'))) return true;
-  if (fs.existsSync(path.join(dir, 'world_book')) || fs.existsSync(path.join(dir, 'message'))) return true;
+  if (fs.existsSync(path.join(dir, 'lorebooks')) || fs.existsSync(path.join(dir, 'lorebook')) || fs.existsSync(path.join(dir, 'world_book')) || fs.existsSync(path.join(dir, 'message'))) return true;
   if (fs.existsSync(path.join(dir, 'world')) && fs.existsSync(path.join(dir, 'character'))) return true;
   return false;
 }

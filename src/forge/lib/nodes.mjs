@@ -42,9 +42,11 @@ export function quoteBarePosition(fmText) {
 //   card.md                    卡根
 //   <字段>.md                  单槽字段（description.md 等），字段为空就不生成
 //   message/<n>.md             0 = first_mes，1 起 = 备选开场白
-//   world_book/**/<条目>.md    世界书条目，可以建子文件夹分组
+//   lorebooks/**/<条目>.md     世界书条目（向下兼容旧目录名 world_book/ 与 lorebook/），可以建子文件夹分组
 // 其余文件（调研.md、记录/、候选/ 等）不参与装配。
-export const LAYOUT = { card: 'card.md', message: 'message', book: 'world_book', regex: 'regex', scripts: 'scripts', cover: 'character.png' };
+export const LAYOUT = { card: 'card.md', message: 'message', book: 'lorebooks', regex: 'regex', scripts: 'scripts', cover: 'character.png' };
+export const BOOK_DIRS = new Set(['lorebooks', 'lorebook', 'world_book']);
+export const isBookDir = name => BOOK_DIRS.has(name);
 export const FIELD_FILES = {
   description: 'character', personality: 'character', scenario: 'world',
   mes_example: 'corpus', system_prompt: 'output', post_history_instructions: 'output',
@@ -67,8 +69,8 @@ function implied(rel) {
       ? { id: 'fld-first_mes', type: 'greeting', target: 'first_mes', title: '开场白' }
       : { id: `greet-alt-${String(n).padStart(2, '0')}`, type: 'greeting', target: 'alternate_greetings', title: `备选${String(n).padStart(2, '0')}`, order: n };
   }
-  // 放在 world_book/ 下就是世界书条目：去处由位置定，类型只管排序分组和标签检查
-  if (parts[0] === LAYOUT.book) return { id: `wb-${parts.slice(1).join('/').replace(/\.md$/, '')}`, type: 'lore', target: 'character_book', title: stem };
+  // 放在 lorebooks/（或旧版 world_book/）下就是世界书条目：去处由位置定，类型只管排序分组和标签检查
+  if (isBookDir(parts[0])) return { id: `wb-${parts.slice(1).join('/').replace(/\.md$/, '')}`, type: 'lore', target: 'character_book', title: stem };
   return null;
 }
 
@@ -81,7 +83,7 @@ async function* walk(root, dir = root) {
     if (e.isDirectory()) {
       if (SKIP_DIRS.has(e.name)) continue;
       const top = rel.split(/[\\/]/)[0];
-      if (top === LAYOUT.book || (top === LAYOUT.message && rel === LAYOUT.message)) yield* walk(root, full);
+      if (isBookDir(top) || (top === LAYOUT.message && rel === LAYOUT.message)) yield* walk(root, full);
     } else if (e.isFile() && e.name.endsWith('.md')) {
       const defaults = implied(rel);
       if (defaults) yield { file: full, rel, defaults };
@@ -116,27 +118,28 @@ export function parseNodeFile(raw, relPath) {
     rest = raw.slice(fmMatch[0].length);
   }
 
-  // body 标记：恰好一次
+  // 标准 Frontmatter 格式直接以第二个 --- 之后的内容作为正文；
+  // 若旧文件包含 <!-- body --> 标记，则向下兼容按 <!-- body --> 分割（出现多次仍报 P2）。
   const markCount = rest.split(BODY_MARK).length - 1;
   let body = '';
   if (markCount === 0) {
-    problems.push({ rule: 'P1', message: `缺少正文边界标记 ${BODY_MARK}（旧节点请人工补标记，工具不猜）` });
+    const trimmed = rest.replaceAll('\r\n', '\n').replace(/^\s+/, '').replace(/\s+$/, '');
+    body = trimmed ? `${trimmed}\n` : '';
   } else if (markCount > 1) {
     problems.push({ rule: 'P2', message: `正文边界标记出现 ${markCount} 次，只能有一次` });
   } else {
     body = rest.slice(rest.indexOf(BODY_MARK) + BODY_MARK.length)
-    .replaceAll('\r\n', '\n')
-    .replace(/^\s+/, '')
-    .replace(/\s+$/, '') + '\n';
+      .replaceAll('\r\n', '\n')
+      .replace(/^\s+/, '')
+      .replace(/\s+$/, '') + '\n';
   }
 
-  // 状态只从工序段（body 标记之前）提取，正文里出现「状态」二字不算
-  const head = markCount >= 1 ? rest.slice(0, rest.indexOf(BODY_MARK)) : rest;
+  // 状态与确认方式：旧文件从工序段（body 标记之前）或 frontmatter 提取
+  const head = markCount >= 1 ? rest.slice(0, rest.indexOf(BODY_MARK)) : '';
   const sm = head.match(/^\s*-\s*状态[：:]\s*(\S+)/m);
-  const status = sm ? sm[1] : null;
-  // 确认方式：作者确认 / 作者委托（……），同样只从工序段取
+  const status = sm ? sm[1] : (typeof frontmatter.status === 'string' ? frontmatter.status : null);
   const cm = head.match(/^\s*-\s*确认方式[：:]\s*(.+?)\s*$/m);
-  const confirm = cm ? cm[1] : null;
+  const confirm = cm ? cm[1] : (typeof frontmatter.confirm === 'string' ? frontmatter.confirm : null);
 
   return { frontmatter, body, problems, status, confirm, loose: false };
 }

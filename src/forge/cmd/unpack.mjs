@@ -100,9 +100,13 @@ export function safeDirName(s, used = new Set()) {
   return name;
 }
 
-export function nodeText(fm, body, source) {
+export function nodeText(fm, body) {
+  if (!fm || Object.keys(fm).length === 0) {
+    return `${body}${body.endsWith('\n') ? '' : '\n'}`;
+  }
   const head = YAML.stringify(fm, { lineWidth: 0 }).trimEnd();
-  return `---\n${head}\n---\n\n## 工序\n- 来源：${source}\n- 状态：草稿\n\n${BODY_MARK}\n${body}\n`;
+  if (!body) return `---\n${head}\n---\n`;
+  return `---\n${head}\n---\n\n${body}${body.endsWith('\n') ? '' : '\n'}`;
 }
 
 // 条目 → frontmatter（只写节点协议已有的字段；其余差异第二遍补进 tavern）
@@ -217,21 +221,21 @@ export async function unpackCmd(file, opts = {}) {
   if (d.creator_notes) cardFm.creator_notes = String(d.creator_notes);
   files.set('card.md', { fm: cardFm, body: '' });
 
-  // 单槽字段
+  // 单槽字段：直接生成纯正文（零 YAML 头、零 <!-- body -->）
   for (const [field, spec] of Object.entries(FIELD_NODES)) {
     const text = String(d[field] ?? '');
     if (!text) continue;
     if (!bodyRoundTrips(text)) notes.push(`${field}：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
-    files.set(spec.file, { fm: { id: `fld-${field}`, type: spec.type, target: field, title: field === 'first_mes' ? '开场白' : field }, body: text });
+    files.set(spec.file, { fm: null, body: text });
   }
   (d.alternate_greetings ?? []).forEach((g, i) => {
     const text = String(g ?? '');
     const num = String(i + 1).padStart(2, '0');
     if (!bodyRoundTrips(text)) notes.push(`备选开场白 ${num}：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
-    files.set(`message/${i + 1}.md`, { fm: { id: `greet-alt-${num}`, type: 'greeting', target: 'alternate_greetings', title: `备选${num}`, order: i + 1 }, body: text });
+    files.set(`message/${i + 1}.md`, { fm: null, body: text });
   });
 
-  // 世界书条目：拆的时候分不出类型，先记 lore；一条一个 world_book/<条目名>.md
+  // 世界书条目：拆的时候分不出类型，先记 lore；一条一个 lorebooks/<条目名>.md
   const entries = d.character_book?.entries ?? [];
   const used = new Set();
   const usedNodeIds = new Set();
@@ -247,7 +251,7 @@ export async function unpackCmd(file, opts = {}) {
     let nodeId = `wb-${e.id ?? i}`;
     for (let suffix = 2; usedNodeIds.has(nodeId); suffix++) nodeId = `wb-${e.id ?? i}-${suffix}`;
     usedNodeIds.add(nodeId);
-    const rel = `world_book/${safeDirName(e.comment || nodeId, used)}.md`;
+    const rel = `lorebooks/${safeDirName(e.comment || nodeId, used)}.md`;
     const text = String(e.content ?? '');
     if (!bodyRoundTrips(text)) notes.push(`条目「${e.comment}」：正文首尾有空白、含 CR 或含 body 标记，装回时会有差异`);
     files.set(rel, { fm: entryFrontmatter(e, nodeId), body: text });
@@ -329,14 +333,14 @@ export async function unpackCmd(file, opts = {}) {
   const added = [], wsOnly = [];
   const diffs = diffPaths(normalizeCard(card), normalizeCard(built), '', [], added, wsOnly);
 
-  const withOv = [...files.values()].filter(f => f.fm.tavern && f.fm.type !== 'card').length;
+  const withOv = [...files.values()].filter(f => f.fm?.tavern && f.fm?.type !== 'card').length;
   const lines = [];
   lines.push(`unpack：${file}${bookOnly ? `（独立世界书「${bookOnly}」，卡根只记世界书名；推送、拉回用 tt-card 的 --book）` : ''}`);
   lines.push(`输出：${out}`);
   lines.push(`节点：${files.size} 个（世界书条目 ${entries.length}、备选开场白 ${(d.alternate_greetings ?? []).length}、单槽字段 ${Object.values(FIELD_NODES).filter(s => files.has(s.file)).length}、卡根 1）`);
   lines.push(`带 tavern 段的条目：${withOv} 个；卡根 tavern 段：${Object.keys(cardOv).join('、') || '无'}`);
   if (extraItems.length) lines.push(`正则/脚本/变量：共 ${extraItems.length} 项，拆成文件 ${extraItems.filter(i => !keep.has(i.key)).length} 项，留在 card.md ${extraItems.filter(i => keep.has(i.key)).length} 项`);
-  lines.push('条目类型一律先记为 lore、放在 world_book/，类型待人工调整；order 原样保留，所以改类型不影响顺序。');
+  lines.push('条目类型一律先记为 lore、放在 lorebooks/，类型待人工调整；order 原样保留，所以改类型不影响顺序。');
   if (added.length) lines.push(`原卡没有、装配时补上酒馆默认值的键：${[...new Set(added)].join('、')}`);
   for (const n of notes) if (!n.includes('正文首尾有空白')) lines.push(`注意：${n}`);
   const wsNotes = notes.filter(n => n.includes('正文首尾有空白'));
