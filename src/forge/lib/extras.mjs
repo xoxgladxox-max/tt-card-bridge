@@ -282,7 +282,8 @@ export function detectFrameworks(card, extraText = '') {
     out.push({ id: 'mvu', label: `MVU（${ver}）`, hint: '只需要装酒馆助手；MVU 本体由卡里的脚本从 jsdelivr 加载' });
   }
   if (/<state>|xbgetvar|<varevent>|<<taskjs>>/i.test(all) || xbPresent(x['xiaobaix-tasks']) || xbTemplatePresent(x['xiaobaix-template']) || lwbPresent(x.LittleWhiteBox)) {
-    out.push({ id: 'xiaobaix', label: '小白X', hint: '需要小白X 3.0 以上，并在小白X 设置里把变量模式切到 2.0 (state)' });
+    // state2：正文 <state> 或读取宏要靠小白X「变量管理 · 2.0 (state)」解析，面板据此对照酒馆实际设置
+    out.push({ id: 'xiaobaix', label: '小白X', hint: '需要小白X 3.0 以上，并在小白X 设置里把变量模式切到 2.0 (state)', state2: /<state>|xbgetvar/i.test(all) });
   }
   if (!out.length && (th.scripts ?? []).length) out.push({ id: 'tavern_helper', label: '仅酒馆助手', hint: '需要装酒馆助手' });
   if (!out.length) out.push({ id: 'none', label: '没有变量框架', hint: '' });

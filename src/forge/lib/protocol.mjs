@@ -277,28 +277,19 @@ export function validateNodes(scan) {
     }
   }
 
-  // P26 显式 <thinking> 协议配对双通道剥离正则检查
+  // P26 回复标签块配隐藏正则：输出协议要求模型写出的、不给读者看的标签块，每种都要有一条双通道正则
   {
-    const hasThinkingBlock = s => typeof s === 'string' && s.includes('<thinking>') && s.includes('</thinking>');
-    const hasExplicitThinking = scan.nodes.some(n => {
+    const promptNodes = scan.nodes.filter(n => {
       if (n.type === 'card' || n.type === 'note' || n.frontmatter?.enabled === false || !n.body?.trim()) return false;
       const t = defaultTarget(n, scan);
-      const isPromptSlot = t === 'description' || t === 'system_prompt' || (t === 'character_book' && (n.type === 'output' || n.constant === true));
-      return isPromptSlot && hasThinkingBlock(n.body);
+      return PROMPT_SLOTS.has(t) || (t === 'character_book' && (n.type === 'output' || n.constant === true));
     });
-    if (hasExplicitThinking) {
-      const regexEntries = (scan.extras?.regex ?? []).map(x => x?.value ?? x?.data ?? x);
-      const cardRegex = scan.nodes.find(n => n.type === 'card')?.frontmatter?.extensions?.regex_scripts ?? [];
-      const allRegex = [...regexEntries, ...(Array.isArray(cardRegex) ? cardRegex : [])];
-      const hasDualStrip = allRegex.some(r =>
-        r && r.disabled !== true &&
-        typeof r.findRegex === 'string' && /thinking/i.test(r.findRegex) &&
-        r.markdownOnly === true && r.promptOnly === true
-      );
-      if (!hasDualStrip) {
-        const hostNode = scan.nodes.find(n => hasThinkingBlock(n.body)) ?? null;
-        push(warnings, hostNode, 'P26', '启用了显式 <thinking> 思维链块，但 regex/ 未配置同时开启 markdownOnly: true 与 promptOnly: true 的 thinking 剥离正则：历史楼层堆积思考块会污染后续生成');
-      }
+    const regexEntries = (scan.extras?.regex ?? []).map(x => x?.value ?? x?.data ?? x);
+    const cardRegex = scan.nodes.find(n => n.type === 'card')?.frontmatter?.extensions?.regex_scripts ?? [];
+    const allRegex = [...regexEntries, ...(Array.isArray(cardRegex) ? cardRegex : [])];
+    for (const tag of hiddenTagGaps(promptNodes.map(n => n.body), allRegex)) {
+      const hostNode = promptNodes.find(n => usesTag(n.body, tag)) ?? null;
+      push(warnings, hostNode, 'P26', `输出协议要求模型写出 <${tag}> 块，但 regex/ 里没有能匹配它、且同时开启 markdownOnly: true 与 promptOnly: true 的正则：这段会显示在正文里，并随聊天历史反复发给模型`);
     }
   }
 
@@ -318,6 +309,27 @@ export function validateNodes(scan) {
   if (cards.length > 1) push(errors, null, 'P10', `card 类型节点有 ${cards.length} 个，只允许一个 card.md`);
 
   return { errors, warnings };
+}
+
+// 不给读者看的回复标签块（思维链、小白X 变量 2.0 状态块）。新增一种标签只改这里
+export const HIDDEN_REPLY_TAGS = ['thinking', 'think', 'state'];
+const PROMPT_SLOTS = new Set(['description', 'system_prompt', 'post_history_instructions']);
+
+const usesTag = (text, tag) => typeof text === 'string' && text.includes(`<${tag}>`) && text.includes(`</${tag}>`);
+
+// 和酒馆 regexFromString 一样：/…/flags 形式按字面拆，其余整串当正则
+function compileFind(find) {
+  if (typeof find !== 'string' || !find) return null;
+  const m = find.match(/^\/([\s\S]+)\/([a-z]*)$/i);
+  try { return m ? new RegExp(m[1], m[2]) : new RegExp(find); } catch { return null; }
+}
+
+// 返回正文里用到、却没有双通道隐藏正则的标签名
+export function hiddenTagGaps(texts, regexList) {
+  const live = (regexList ?? []).filter(r => r && r.disabled !== true && r.markdownOnly === true && r.promptOnly === true)
+    .map(r => compileFind(r.findRegex)).filter(Boolean);
+  return HIDDEN_REPLY_TAGS.filter(tag => texts.some(t => usesTag(t, tag)))
+    .filter(tag => !live.some(re => { re.lastIndex = 0; return re.test(`<${tag}>\nx: 1\n</${tag}>`); }));
 }
 
 // 节点类型 → 包裹标签（封闭清单，docs/spec/node-protocol.md「补充 · 标签与标题」）；greeting 不加包裹

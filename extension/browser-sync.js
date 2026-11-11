@@ -9159,7 +9159,8 @@ function detectFrameworks(card, extraText = '') {
     out.push({ id: 'mvu', label: `MVU（${ver}）`, hint: '只需要装酒馆助手；MVU 本体由卡里的脚本从 jsdelivr 加载' });
   }
   if (/<state>|xbgetvar|<varevent>|<<taskjs>>/i.test(all) || xbPresent(x['xiaobaix-tasks']) || xbTemplatePresent(x['xiaobaix-template']) || lwbPresent(x.LittleWhiteBox)) {
-    out.push({ id: 'xiaobaix', label: '小白X', hint: '需要小白X 3.0 以上，并在小白X 设置里把变量模式切到 2.0 (state)' });
+    // state2：正文 <state> 或读取宏要靠小白X「变量管理 · 2.0 (state)」解析，面板据此对照酒馆实际设置
+    out.push({ id: 'xiaobaix', label: '小白X', hint: '需要小白X 3.0 以上，并在小白X 设置里把变量模式切到 2.0 (state)', state2: /<state>|xbgetvar/i.test(all) });
   }
   if (!out.length && (th.scripts ?? []).length) out.push({ id: 'tavern_helper', label: '仅酒馆助手', hint: '需要装酒馆助手' });
   if (!out.length) out.push({ id: 'none', label: '没有变量框架', hint: '' });
@@ -9450,8 +9451,8 @@ return { scanCard, BODY_MARK, SKIP_DIRS, LEGACY_NODE_DIRS, isKnownType, KNOWN_TY
 })();
 
 const __mod_protocol = (() => {
-// protocol.mjs — 节点协议校验（P 组规则）
-// 只校验协议与工程配置；成文质量归 card-lint（Agent 语境审查）。
+// protocol.mjs · 节点协议校验（P 组规则）
+// 校验协议与工程配置；成文质量归 card-lint（Agent 语境审查）。
 
 const { isKnownType, KNOWN_TYPE_LIST, parsePosition, defaultTarget, bookNodesOf, assignOrders, orderGroupOf } = __mod_nodes;
 
@@ -9541,35 +9542,35 @@ function validateNodes(scan) {
 
   // P15 导出去处定不下来 → error（原先要到 build 装配时才抛异常）
   const TARGET_HINT = {
-    character: '角色节点要显式写 target: character_book；description 留给本卡元提示词',
-    corpus: '要显式写 target：description 或 character_book',
-    output: '要显式写 target：description、system_prompt，或 character_book 配 @D 低深度',
-    greeting: '要显式写 target：first_mes 或 alternate_greetings',
+    character: '角色节点放入 lorebooks/character/ 归属世界书（或显式写 target: character_book）；顶层 description.md 留给泛用总控',
+    corpus: '语料节点放入 lorebooks/character/（或显式写 target: character_book）',
+    output: '输出协议使用顶层 description.md / system_prompt.md，或放入 lorebooks/ 配 position: "@D0"/"@D1"',
+    greeting: '开场白放入 message/0.md（first_mes）或 message/1.md 起（alternate_greetings）',
   };
   for (const n of scan.nodes) {
     if (!isKnownType(n.type) || n.type === 'card' || n.type === 'note') continue;
     if (defaultTarget(n, scan) === null) {
-      push(errors, n, 'P15', `导出去处定不下来：${TARGET_HINT[n.type] ?? '要显式写 target'}`);
+      push(errors, n, 'P15', `导出去处定不下来：${TARGET_HINT[n.type] ?? '放入对应标准分区目录或显式声明 target'}`);
     }
   }
 
-  // P16 本工作流不用 mes_example；旧工程仍可 build，只警告
+  // P16 兼容 mes_example 提醒；旧工程照常可 build
   for (const n of scan.nodes) {
     if (n.target === 'mes_example') {
-      push(warnings, n, 'P16', 'target=mes_example：本工作流不用酒馆示例对话，台词语料改进 description 或 character_book');
+      push(warnings, n, 'P16', 'target=mes_example：台词语料建议放入 lorebooks/character/ 下的角色语料条目或角色条目台词段');
     }
   }
 
-  // P17 酒馆旧字段不写；旧工程仍可 build，只警告
+  // P17 酒馆可选顶层字段提醒；接卡或发布说明可保留，旧工程照常可 build
   for (const n of scan.nodes) {
     if (n.target === 'post_history_instructions') {
-      push(warnings, n, 'P17', 'target=post_history_instructions：本工作流不写历史指令，输出规范改进 description、system_prompt 或低深度条目');
+      push(warnings, n, 'P17', 'target=post_history_instructions：历史指令建议改放 description.md、system_prompt.md 或低深度世界书条目（接来的外部卡若需原样保留可忽略）');
     }
     if (n.type === 'card') {
       const cn = n.frontmatter.creator_notes;
-      if (typeof cn === 'string' && cn.trim()) push(warnings, n, 'P17', 'creator_notes 有内容：本工作流不写作者注释，留空');
+      if (typeof cn === 'string' && cn.trim()) push(warnings, n, 'P17', 'creator_notes 有内容：确认仅存放面向玩家的启用说明或接卡原有注释，正文设定放入世界书');
       const tags = n.frontmatter.tags;
-      if (Array.isArray(tags) && tags.length) push(warnings, n, 'P17', 'tags 有内容：本工作流不写酒馆标签，留空');
+      if (Array.isArray(tags) && tags.length) push(warnings, n, 'P17', 'tags 有内容：确认仅存放酒馆分类标签或接卡原有标签');
     }
   }
 
@@ -9616,19 +9617,21 @@ function validateNodes(scan) {
     if (bad.length) push(warnings, w, 'P19', `${kind === 'head' ? '开头' : '收尾'} order ${o} 没有${kind === 'head' ? '小' : '大'}于组内所有条目（${bad.map(x => `${x.relPath}=${orders.get(x)}`).join('、')}）`);
   }
 
-  // P20 排序；手写 order 才可能触发
+  // P20 排序；手写 order 才可能触发（接来的外部卡带 tavern 段保留原卡 order 时，仅查重复，豁免分组连续性）
   const GROUP_NAME = { 1: '世界', 2: '人物', 3: '文风', 4: '输出', 5: '开场白及其他' };
   const byOrder = new Map();
   for (const n of book) {
     const o = orders.get(n), g = orderGroupOf(n);
-    if (byOrder.has(o)) push(warnings, n, 'P20', `order ${o} 与 ${byOrder.get(o).relPath} 重复：同一位置里谁先谁后就不确定了`);
+    if (byOrder.has(o)) push(warnings, n, 'P20', `order ${o} 与 ${byOrder.get(o).relPath} 重复：同一位置里先后顺序会不确定`);
     else byOrder.set(o, n);
-    if (Math.floor(o / width) !== g) push(warnings, n, 'P20', `order ${o} 不在${GROUP_NAME[g]}组（type: ${n.type} → 应为 ${g * width + 1} 起连续编号）：先按内容确认 type 对不对（迁移、拆卡时 type 可能是按目录机械填的）；type 不对就改 type，type 对再改 order 或删掉手写的 order 自动编号`);
+    if (n.frontmatter?.tavern !== undefined) continue;
+    if (Math.floor(o / width) !== g) push(warnings, n, 'P20', `order ${o} 不在${GROUP_NAME[g]}组（type: ${n.type} → 应为 ${g * width + 1} 起号段）：请先按内容确认 type，再对齐号段或省略手写 order 交构建器自动编号`);
   }
   for (const g of [...new Set(book.map(orderGroupOf))]) {
-    const nums = book.filter(n => orderGroupOf(n) === g).map(n => orders.get(n)).filter(o => Math.floor(o / width) === g).sort((a, b) => a - b);
+    const groupNodes = book.filter(n => orderGroupOf(n) === g && n.frontmatter?.tavern === undefined);
+    const nums = groupNodes.map(n => orders.get(n)).filter(o => Math.floor(o / width) === g).sort((a, b) => a - b);
     const gap = nums.findIndex((o, i) => o !== g * width + 1 + i);
-    if (nums.length && gap !== -1) push(warnings, null, 'P20', `${GROUP_NAME[g]}组 order 不连续（${nums.join('、')}）：应从 ${g * width + 1} 起逐一递增；删掉手写的 order 即可自动编号`);
+    if (nums.length && gap !== -1) push(warnings, null, 'P20', `${GROUP_NAME[g]}组 order 不连续（${nums.join('、')}）：新建卡默认从 ${g * width + 1} 起连续递增（省略手写 order 可自动编号；有意预留插槽时可忽略）`);
   }
 
   // P11 状态值须在协议四态内（没写状态行不报；旧卡不强制迁移，所以只警告）
@@ -9727,6 +9730,22 @@ function validateNodes(scan) {
     }
   }
 
+  // P26 回复标签块配隐藏正则：输出协议要求模型写出的、不给读者看的标签块，每种都要有一条双通道正则
+  {
+    const promptNodes = scan.nodes.filter(n => {
+      if (n.type === 'card' || n.type === 'note' || n.frontmatter?.enabled === false || !n.body?.trim()) return false;
+      const t = defaultTarget(n, scan);
+      return PROMPT_SLOTS.has(t) || (t === 'character_book' && (n.type === 'output' || n.constant === true));
+    });
+    const regexEntries = (scan.extras?.regex ?? []).map(x => x?.value ?? x?.data ?? x);
+    const cardRegex = scan.nodes.find(n => n.type === 'card')?.frontmatter?.extensions?.regex_scripts ?? [];
+    const allRegex = [...regexEntries, ...(Array.isArray(cardRegex) ? cardRegex : [])];
+    for (const tag of hiddenTagGaps(promptNodes.map(n => n.body), allRegex)) {
+      const hostNode = promptNodes.find(n => usesTag(n.body, tag)) ?? null;
+      push(warnings, hostNode, 'P26', `输出协议要求模型写出 <${tag}> 块，但 regex/ 里没有能匹配它、且同时开启 markdownOnly: true 与 promptOnly: true 的正则：这段会显示在正文里，并随聊天历史反复发给模型`);
+    }
+  }
+
   // P21 编号保留不用：world_book/ 下可以建子文件夹分组，装配不看目录，不再报嵌套
 
   // P10 卡根数量与旧版节点树拦截（缺失 card.md 或仍为未迁移的旧版节点树时必须报 error 阻断构建）
@@ -9743,6 +9762,27 @@ function validateNodes(scan) {
   if (cards.length > 1) push(errors, null, 'P10', `card 类型节点有 ${cards.length} 个，只允许一个 card.md`);
 
   return { errors, warnings };
+}
+
+// 不给读者看的回复标签块（思维链、小白X 变量 2.0 状态块）。新增一种标签只改这里
+const HIDDEN_REPLY_TAGS = ['thinking', 'think', 'state'];
+const PROMPT_SLOTS = new Set(['description', 'system_prompt', 'post_history_instructions']);
+
+const usesTag = (text, tag) => typeof text === 'string' && text.includes(`<${tag}>`) && text.includes(`</${tag}>`);
+
+// 和酒馆 regexFromString 一样：/…/flags 形式按字面拆，其余整串当正则
+function compileFind(find) {
+  if (typeof find !== 'string' || !find) return null;
+  const m = find.match(/^\/([\s\S]+)\/([a-z]*)$/i);
+  try { return m ? new RegExp(m[1], m[2]) : new RegExp(find); } catch { return null; }
+}
+
+// 返回正文里用到、却没有双通道隐藏正则的标签名
+function hiddenTagGaps(texts, regexList) {
+  const live = (regexList ?? []).filter(r => r && r.disabled !== true && r.markdownOnly === true && r.promptOnly === true)
+    .map(r => compileFind(r.findRegex)).filter(Boolean);
+  return HIDDEN_REPLY_TAGS.filter(tag => texts.some(t => usesTag(t, tag)))
+    .filter(tag => !live.some(re => { re.lastIndex = 0; return re.test(`<${tag}>\nx: 1\n</${tag}>`); }));
 }
 
 // 节点类型 → 包裹标签（封闭清单，docs/spec/node-protocol.md「补充 · 标签与标题」）；greeting 不加包裹
@@ -9809,8 +9849,8 @@ function entryShape(n) {
     if (cleanStem && t.trim() && cleanStem !== t.trim() && !t.includes(cleanStem) && !cleanStem.includes(t.trim())) {
       add('P18f', `文件名「${n.stem}」与 title「${t}」不一致：酒馆世界书列表以 title 为准，若想修改酒馆里的条目名请同步修改 title`);
     }
-    if (n.type !== 'character' && /^(?:世界|法则|规则|生态|器物|道具|地点|文风|输出|历史)\s*[·•·]\s*\S/.test(t.trim())) {
-      add('P18f', `title「${t}」带有冗余分类前缀：非角色条目请直接写自然名称，去掉「世界 · / 法则 · / 文风 · 」等类型前缀`);
+    if (n.type !== 'character' && n.frontmatter?.tavern === undefined && /^(?:世界|法则|规则|生态|器物|道具|地点|文风|输出|历史)\s*[·•]\s*\S/.test(t.trim())) {
+      add('P18f', `title「${t}」带有冗余分类前缀：新建卡非角色条目建议直接写自然名称（如去掉「世界 · / 法则 · / 文风 · 」前缀）`);
     }
   }
   return { problems, blocks };
@@ -9827,7 +9867,7 @@ function formatReport({ errors, warnings }) {
   for (const w of warnings) lines.push(`  [!] ${w.node} [${w.rule}] ${w.message}`);
   return lines.join('\n');
 }
-return { STATUS_ORDER, validateNodes, TAG_OF_TYPE, entryShape, entryShapeProblems, formatReport };
+return { STATUS_ORDER, validateNodes, HIDDEN_REPLY_TAGS, hiddenTagGaps, TAG_OF_TYPE, entryShape, entryShapeProblems, formatReport };
 })();
 
 const __mod_build = (() => {

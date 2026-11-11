@@ -1,9 +1,9 @@
 // One authenticated loopback connection serves the settings panel and queued tasks.
 // 带上版本号查询参数，避免在酒馆点「更新扩展」后浏览器继续使用旧版子模块缓存
-import { createBridgeClient, createJobConsumer } from './client.js?v=0.4.1';
-import { mountSettings } from './settings.js?v=0.4.1';
-import { createTavernMutations } from './tavern-mutations.js?v=0.4.1';
-import { createBrowserSyncRuntime } from './browser-sync.js?v=0.4.1';
+import { createBridgeClient, createJobConsumer } from './client.js?v=0.4.2';
+import { mountSettings } from './settings.js?v=0.4.2';
+import { createTavernMutations } from './tavern-mutations.js?v=0.4.2';
+import { createBrowserSyncRuntime } from './browser-sync.js?v=0.4.2';
 
 const TAG = '[tt-card-bridge]';
 let known = null;
@@ -19,6 +19,10 @@ const errText = e => String(e?.message ?? e);
 
 async function refreshCards(files) {
   // TauriTavern 后端有角色卡缓存；原生 SillyTavern 写卡时自己会清缓存，没有 __TAURITAVERN__
+  // 记下当前卡写回前的卡内正则：变了要重载聊天，已显示的楼层才会按新正则重新显示
+  const regexOf = c => JSON.stringify(c?.data?.extensions?.regex_scripts ?? []);
+  const before = ctx();
+  const regexBefore = regexOf(before.characters?.[Number(before.characterId)]);
   if (tt()?.invoke) await tt().invoke.safeInvoke('clear_character_cache');
   const st = ctx();
   await st.getCharacters();
@@ -36,12 +40,12 @@ async function refreshCards(files) {
 
   await now.unshallowCharacter(String(cid));
   await now.selectCharacterById(Number(cid), { switchMenu: false });
-  await syncActiveCardRuntime(Number(cid));
+  await syncActiveCardRuntime(Number(cid), { regexChanged: regexOf(ctx().characters?.[Number(cid)]) !== regexBefore });
   return `当前角色卡「${current.name}」`;
 }
 
 // 当前打开的卡写回后，通知宿主页面上已安装的公开全局接口（世界书绑定状态、酒馆助手、开场白第0楼、消息重绘）刷新内存状态
-async function syncActiveCardRuntime(cid) {
+async function syncActiveCardRuntime(cid, { regexChanged = false } = {}) {
   const latest = ctx();
   const card = latest?.characters?.[cid];
   if (!card) return;
@@ -73,14 +77,18 @@ async function syncActiveCardRuntime(cid) {
   } else if (helper && Array.isArray(ext.TavernHelper_scripts) && typeof helper.replaceScriptTrees === 'function') {
     try { await helper.replaceScriptTrees(ext.TavernHelper_scripts, { type: 'character' }); } catch (e) { console.warn(TAG, e); }
   }
+  let reload = regexChanged && Array.isArray(latest.chat) && latest.chat.length > 0;
   const first = latest.chat?.[0];
   if (Array.isArray(latest.chat) && latest.chat.length === 1 && first && !first.is_user && !first.is_system
     && !latest.chatMetadata?.tainted && (first.swipe_id ?? 0) === 0
     && typeof card.first_mes === 'string' && card.first_mes && first.mes !== card.first_mes) {
     first.mes = card.first_mes;
     if (Array.isArray(first.swipes)) first.swipes[0] = card.first_mes;
-    try { await latest.saveChatConditional?.(); await latest.reloadCurrentChat?.(); } catch (e) { console.warn(TAG, e); }
+    try { await latest.saveChatConditional?.(); } catch (e) { console.warn(TAG, e); }
+    reload = true;
   }
+  // 重载聊天会发出 CHAT_CHANGED：酒馆随之清掉正则缓存、重绘正则面板
+  if (reload) { try { await latest.reloadCurrentChat?.(); } catch (e) { console.warn(TAG, e); } }
   try { await window.processExistingMessages?.(); } catch (e) { console.warn(TAG, e); }
 }
 
