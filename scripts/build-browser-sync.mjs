@@ -637,7 +637,7 @@ async function clearSavedHandle() {
 }
 
 const IGNORED_DIRS = new Set(['backups', 'dist', 'node_modules', '.git']);
-const ALLOWED_PROJECT_SUBDIRS = new Set(['.card-forge', 'message', 'world_book', 'regex', 'scripts', '待归位', 'world', 'character', 'greeting', 'output', 'style']);
+const ALLOWED_PROJECT_SUBDIRS = new Set(['.card-forge', 'message', 'world_book', 'regex', 'scripts', 'variables', '待归位', 'world', 'character', 'greeting', 'output', 'style']);
 const ALLOWED_FILE_EXTS = /\.(md|json|js|html|png)$/i;
 
 export function createBrowserSyncRuntime({ getContext, mutations, runRenameJob, fetchImpl = (...args) => fetch(...args) }) {

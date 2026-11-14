@@ -24,6 +24,14 @@ async function refreshCards(files) {
   const before = ctx();
   const regexBefore = regexOf(before.characters?.[Number(before.characterId)]);
   if (tt()?.invoke) await tt().invoke.safeInvoke('clear_character_cache');
+  // 小白X 变量 3.0 要在重载角色列表之前刷新：它拿内存里的旧规则和刚写入的规则比，有变化才重算描述投影
+  const state3Error = await refreshState3Rules(before, files);
+  const refreshed = await reloadCards(files, regexBefore, regexOf);
+  if (state3Error) throw state3Error;
+  return refreshed;
+}
+
+async function reloadCards(files, regexBefore, regexOf) {
   const st = ctx();
   await st.getCharacters();
   if (typeof st.getOneCharacter === 'function') {
@@ -42,6 +50,17 @@ async function refreshCards(files) {
   await now.selectCharacterById(Number(cid), { switchMenu: false });
   await syncActiveCardRuntime(Number(cid), { regexChanged: regexOf(ctx().characters?.[Number(cid)]) !== regexBefore });
   return `当前角色卡「${current.name}」`;
+}
+
+// 小白X 变量 3.0 的公开接口：卡外工具写卡后由页面重新读取当前卡的规则（LittleWhiteBox docs/user/variables-v3-external.md）。
+// 没装小白X、没开变量功能、群聊或写的不是当前卡时不调用。出错先记下，等卡片照常重载完再报给面板
+async function refreshState3Rules(before, files) {
+  const api = window.LWB_StateV3;
+  if (typeof api?.refreshRules !== 'function' || before.groupId) return null;
+  const avatar = before.characters?.[Number(before.characterId)]?.avatar;
+  if (!avatar || (files?.length && !files.includes(avatar))) return null;
+  try { await api.refreshRules({ avatar }); return null; }
+  catch (e) { return new Error(`小白X 变量 3.0 规则刷新失败：${errText(e)}`); }
 }
 
 // 当前打开的卡写回后，通知宿主页面上已安装的公开全局接口（世界书绑定状态、酒馆助手、开场白第0楼、消息重绘）刷新内存状态
