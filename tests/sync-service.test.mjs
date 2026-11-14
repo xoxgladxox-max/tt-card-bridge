@@ -634,3 +634,61 @@ test('frontend cards: supports tuple/legacy tavern_helper, duplicate regex UUIDs
 });
 
 
+
+test('xiaobaix variables 3.0 rules sync as the plugin variables/ layout and are never silently deleted', async t => {
+  const f = await fileFixture(t);
+  const bundle = { definition: { format: 1, variables: { hp: { type: 'number' } } }, functions: { heal: 'return 1;\n' }, scripts: { calculate: 'state.hp += 1;\n' } };
+  const card = readCardPng(f.pngPath);
+  card.data.extensions['lwb-state3'] = JSON.stringify(bundle);
+  card.data.extensions.LittleWhiteBox = { vars: { legacy: true } };
+  fs.writeFileSync(f.pngPath, embedChara(basePng, card));
+  const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
+  const dir = path.join(f.cardsRoot, p.id), read = rel => fs.readFileSync(path.join(dir, rel), 'utf8');
+  // 3.0 规则与 2.0 的 LittleWhiteBox 各走各的文件，card.md 里不再重复留规则包
+  assert.deepEqual(JSON.parse(read('variables/definition.json')), bundle.definition);
+  assert.equal(read('variables/functions/heal.js'), bundle.functions.heal);
+  assert.equal(read('variables/scripts/calculate.js'), bundle.scripts.calculate);
+  assert.deepEqual(JSON.parse(read('scripts/xiaobaix-variables.json')), { vars: { legacy: true } });
+  assert.equal(read('card.md').includes('lwb-state3'), false);
+  assert.equal((await f.service.control({ action: 'check', projectId: p.id })).results[0].diff.clean, true);
+
+  // 本地改函数、加工具：推回的是整串规则包
+  fs.writeFileSync(path.join(dir, 'variables/functions/heal.js'), 'return 2;\n');
+  fs.mkdirSync(path.join(dir, 'variables/tools'));
+  fs.writeFileSync(path.join(dir, 'variables/tools/roll.js'), 'return 6;\n');
+  assert.equal((await f.service.control({ action: 'sync', projectId: p.id })).results[0].status, 'clean');
+  const pushed = JSON.parse(readCardPng(f.pngPath).data.extensions['lwb-state3']);
+  assert.deepEqual(pushed, { ...bundle, functions: { heal: 'return 2;\n' }, tools: { roll: 'return 6;\n' } });
+
+  // 酒馆里删掉一个函数：拉回时删除对应文件
+  const remote = readCardPng(f.pngPath);
+  remote.data.extensions['lwb-state3'] = JSON.stringify({ ...pushed, functions: {} });
+  fs.writeFileSync(f.pngPath, embedChara(basePng, remote));
+  assert.equal((await f.service.control({ action: 'sync', projectId: p.id })).results[0].status, 'clean');
+  assert.equal(fs.existsSync(path.join(dir, 'variables/functions/heal.js')), false);
+  assert.equal(read('variables/tools/roll.js'), 'return 6;\n');
+
+  // 工程里删掉整套规则：不推空值，也不悄悄写回本地，停下等作者处理
+  const before = readCardPng(f.pngPath).data.extensions['lwb-state3'];
+  fs.rmSync(path.join(dir, 'variables'), { recursive: true });
+  const stopped = (await f.service.control({ action: 'sync', projectId: p.id })).results[0];
+  assert.equal(stopped.status, 'needsReconnect');
+  assert.deepEqual(stopped.diff.issues.map(i => [i.kind, i.key]), [['removed', 'state3']]);
+  assert.equal(readCardPng(f.pngPath).data.extensions['lwb-state3'], before);
+  assert.equal(fs.existsSync(path.join(dir, 'variables')), false);
+});
+
+test('unrecognized variables 3.0 project files fail instead of being dropped', async t => {
+  const f = await fileFixture(t);
+  const card = readCardPng(f.pngPath);
+  card.data.extensions['lwb-state3'] = JSON.stringify({ definition: { format: 1 }, functions: {} });
+  fs.writeFileSync(f.pngPath, embedChara(basePng, card));
+  const p = await f.service.control({ action: 'attach', cardFile: 'A.png' });
+  const dir = path.join(f.cardsRoot, p.id);
+  fs.mkdirSync(path.join(dir, 'variables/scripts'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'variables/scripts/unknown-phase.js'), 'x');
+  const before = readCardPng(f.pngPath).data.extensions['lwb-state3'];
+  const bad = (await f.service.control({ action: 'sync', projectId: p.id })).results[0];
+  assert.equal(bad.status, 'error'); assert.equal(bad.error.code, 'INVALID_FORMAT');
+  assert.equal(readCardPng(f.pngPath).data.extensions['lwb-state3'], before);
+});

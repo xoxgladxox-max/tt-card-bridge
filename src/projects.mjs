@@ -9,7 +9,7 @@ export const targetOccupied = (record, target) => reservedTargets(record).includ
 // 工作区布局：cards/<卡名>/ 一张卡一个文件夹；cards/backups/ 是旧版备份目录，不是工程
 export const BACKUPS_DIR = 'backups';
 export const INTERNAL_SUBDIRS = new Set([
-  'backups', 'dist', 'lorebooks', 'lorebook', 'world_book', 'message', 'regex', 'scripts', 'note',
+  'backups', 'dist', 'lorebooks', 'lorebook', 'world_book', 'message', 'regex', 'scripts', 'variables', 'note',
   '记录', '候选', '待归位',
   'world', 'character', 'greeting', 'output', 'style', 'archive', 'export', 'logs', 'tools',
 ]);

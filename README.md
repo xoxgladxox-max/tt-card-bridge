@@ -73,6 +73,9 @@
   world_book/**/<条目>.md      世界书条目（支持子文件夹分组；新建条目可省略 id，同步时自动补齐）
   regex/<序号>-<名>.json+.html 拆出的正则设置与替换内容
   scripts/<序号>-<名>.json+.js 拆出的酒馆助手脚本、variables.json、xiaobaix-tasks.json
+  variables/                   小白X 变量 3.0 规则（extensions['lwb-state3']），目录与小白X 自带 state3 unpack 相同：
+                               definition.json、functions/*.js、tools/*.js、scripts/{prepare,calculate,committed}.js
+                               当前卡写入后自动调用小白X 的 LWB_StateV3.refreshRules；工程里整个删掉时同步停下，不替你删卡里的规则
   character.png                封面图（可选，新建卡无封面图时使用默认封面）
 ```
 > 文件夹里放 `调研.md`、`记录/`、`候选/`、`待归位/`、`note/` 等资料不会进卡，也不会干扰同步。

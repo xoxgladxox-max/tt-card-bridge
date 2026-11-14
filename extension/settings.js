@@ -238,8 +238,8 @@ export function mountSettings({ client, getContext, refreshCards }) {
         if (xbGap) fw.append(element('small', xbGap, 'ttcb-warning'), element('br'));
         box.replaceChildren();
         if (!res.items?.length) { box.append(element('small', '这张卡没有正则、脚本或角色变量。')); return; }
-        box.append(element('small', '勾上的拆成文件（regex\\、scripts\\），不勾的留在 card.md 里；两种都会完整合回卡里。'));
-        const kinds = { regex: '正则', script: '脚本', vars: '变量', xbtasks: '小白X任务', xbtemplate: '小白X模板', xbvars: '小白X变量' };
+        box.append(element('small', '勾上的拆成文件（regex\\、scripts\\、variables\\），不勾的留在 card.md 里；两种都会完整合回卡里。'));
+        const kinds = { regex: '正则', script: '脚本', vars: '变量', xbtasks: '小白X任务', xbtemplate: '小白X模板', xbvars: '小白X变量', state3: '小白X变量3.0' };
         for (const item of res.items) {
             const label = element('label', undefined, 'checkbox_label');
             const cb = element('input'); cb.type = 'checkbox'; cb.checked = item.split; cb.dataset.extraKey = item.key;
@@ -247,16 +247,19 @@ export function mountSettings({ client, getContext, refreshCards }) {
             box.append(label);
         }
     }
-    // 卡用小白X 变量 2.0（正文 <state> / xbgetvar）时，对照酒馆里小白X 的实际开关；只提示，不替作者改设置
+    // 卡用小白X 变量 2.0（正文 <state> / xbgetvar）或 3.0（lwb-state3 规则）时，对照酒馆里小白X 的实际开关；只提示，不替作者改设置
     function xiaobaixModeGap(frameworks) {
-        if (!(frameworks ?? []).some(f => f.id === 'xiaobaix' && f.state2)) return '';
+        const list = frameworks ?? [];
+        const mode = list.some(f => f.state3) ? { want: '3.0', name: '变量 3.0', pick: '3.0', effect: '变量规则不会运行' }
+            : list.some(f => f.id === 'xiaobaix' && f.state2) ? { want: '2.0', name: '变量 2.0', pick: '2.0 (state)', effect: '<state> 不会写进变量' } : null;
+        if (!mode) return '';
         const lwb = getContext()?.extensionSettings?.LittleWhiteBox;
-        if (!lwb) return '这张卡用小白X 变量 2.0，但酒馆里没有检测到小白X 扩展：<state> 不会被解析。';
+        if (!lwb) return `这张卡用小白X ${mode.name}，但酒馆里没有检测到小白X 扩展：${mode.effect}。`;
         const off = [];
         if (lwb.enabled === false) off.push('「渲染交互 → 启用小白X」');
         if (lwb.variablesCore?.enabled !== true) off.push('「数据互动 → 变量控制 → 变量管理」');
-        if (String(lwb.variablesMode ?? '1.0') !== '2.0') off.push('「数据互动 → 变量控制」右侧选 2.0 (state)');
-        return off.length ? `这张卡用小白X 变量 2.0，酒馆里还要打开：${off.join('、')}。否则 <state> 不会写进变量。` : '';
+        if (String(lwb.variablesMode ?? '1.0') !== mode.want) off.push(`「数据互动 → 变量控制」右侧选 ${mode.pick}`);
+        return off.length ? `这张卡用小白X ${mode.name}，酒馆里还要打开：${off.join('、')}。否则${mode.effect}。` : '';
     }
     const keptExtras = () => [...find('extras').querySelectorAll('input[data-extra-key]')].filter(cb => !cb.checked).map(cb => cb.dataset.extraKey);
     // 断开后重连两边不一致、连着时两边都改了、原来的卡已不在、或上次建卡/改名未决卡住：同步停下，提供恢复选择

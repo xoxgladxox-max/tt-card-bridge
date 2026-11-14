@@ -14,6 +14,8 @@ const BODY = '<!-- body -->';
 // 1×1 透明 PNG：工程没有封面、也没有旧卡图时新建卡用
 const BLANK_PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const BODY_FIELDS = new Set(['description', 'personality', 'scenario', 'first_mes', 'mes_example', 'system_prompt', 'post_history_instructions', 'alternate_greetings', 'character_book']);
+// 小白X 变量 3.0 规则包是卡里的字符串：酒馆合并写卡删不掉这个键，写空值又会被小白X 当成坏规则。工程里删掉时停下说明，不替作者猜
+const STATE3_REMOVED = '工程里删掉了小白X 变量 3.0 规则（variables/），同步不会从酒馆角色卡里删除它。要停用请在小白X 里删除这张卡的规则；误删请把 variables/ 恢复回来';
 // 正则、脚本、变量、小白X任务按槽位逐项比，不算卡设置
 function cardSettings(card) {
   return Object.fromEntries(Object.entries(extrasLib.stripExtras(card.data ?? card)).filter(([k]) => !BODY_FIELDS.has(k)));
@@ -222,6 +224,9 @@ export class FileSyncAdapter {
       const names = settingDifferences(cardSettings(built.card), cardSettings(remote.tavern.card));
       if (names.length) issues.push({ kind: 'settings', message: `卡设置不同：${names.join('、')}` });
       if ((built.card.data?.extensions?.world || null) !== remote.worldName) issues.push({ kind: 'binding', message: '工程与酒馆世界书绑定不同' });
+      // 工程里删掉了上次同步过的变量 3.0 规则：先在检查阶段停下，任何文件都还没写
+      const tState3 = remote.tavern.slots.state3;
+      if (tState3 && !nodes.slots.state3 && baseline?.slots?.state3 === slotHash(tState3.value)) issues.push({ kind: 'removed', key: 'state3', message: STATE3_REMOVED });
     }
     // Also inspect entry options outside the legacy slot settings subset (group, recursion, etc.).
     const effective = remote.worldRaw ? unpack.worldFileToCard(JSON.parse(remote.worldRaw), remote.worldName) : remote.tavern.card;
@@ -396,6 +401,7 @@ export class FileSyncAdapter {
       if (snapshot.tavern.slots.xbtasks && !snapshot.nodes.slots.xbtasks) x['xiaobaix-tasks'] = { tasks: [] };
       if (snapshot.tavern.slots.xbtemplate && !snapshot.nodes.slots.xbtemplate) x['xiaobaix-template'] = { enabled: false, template: '' };
       if (snapshot.tavern.slots.xbvars && !snapshot.nodes.slots.xbvars) x.LittleWhiteBox = {};
+      if (snapshot.tavern.slots.state3 && !snapshot.nodes.slots.state3) fail('UNSUPPORTED_DIFFERENCE', STATE3_REMOVED, 409);
       // 数组是整体替换；工程里一条都不剩时要显式写空数组，否则酒馆里的旧内容会留着
       const has = p => Object.keys(snapshot.nodes.slots).some(k => k.startsWith(p)), had = p => Object.keys(snapshot.tavern.slots).some(k => k.startsWith(p));
       if (had('regex:') && !has('regex:')) x.regex_scripts = [];

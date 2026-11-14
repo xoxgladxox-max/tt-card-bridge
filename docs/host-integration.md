@@ -83,5 +83,5 @@ CLI / mirror → 同一个 SyncService / SyncEngine / FileSyncAdapter
 
 - 已领取的任务不会因为刷新页面而重发；未完成的写入记录随工程保存，写入未确认期间不要移动或删除工程目录。
 - 同名工程已存在时不直接覆盖，需要在面板确认覆盖，并按备份设置先备份。跨卡名或跨世界书绑定的备份可以查看，但不能自动恢复。
-- 只认一卡一文件夹的标准结构（`card.md`、`<字段>.md`、`message/`、`world_book/`、`regex/`、`scripts/`）。旧版 `index.md` 节点树和散乱草稿先用 `card-forge-lab` 转成标准结构（`node src/cli.mjs migrate <旧卡目录> --out <新标准卡目录>`）；本工具不会往这类目录写入空的 `card.md`。
+- 只认一卡一文件夹的标准结构（`card.md`、`<字段>.md`、`message/`、`world_book/`、`regex/`、`scripts/`、`variables/`）。旧版 `index.md` 节点树和散乱草稿先用 `card-forge-lab` 转成标准结构（`node src/cli.mjs migrate <旧卡目录> --out <新标准卡目录>`）；本工具不会往这类目录写入空的 `card.md`。
 - 开发版和便携版共用 data 目录，不能同时打开。

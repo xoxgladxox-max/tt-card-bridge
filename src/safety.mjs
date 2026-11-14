@@ -59,6 +59,8 @@ export function isCardFile(rel) {
   // regex/、scripts/ 下拆出来的正则、脚本、变量、模板文件（只收一层）
   if (parts.length === 2 && parts[0] === 'regex') return /\.(json|html)$/.test(parts[1]);
   if (parts.length === 2 && parts[0] === 'scripts') return /\.(json|js|html)$/.test(parts[1]);
+  // variables/ 下是小白X 变量 3.0 规则：definition.json 与 functions/、tools/、scripts/ 里的 .js
+  if (parts[0] === 'variables') return parts.length === 2 ? parts[1] === 'definition.json' : parts.length === 3 && ['functions', 'tools', 'scripts'].includes(parts[1]) && parts[2].endsWith('.js');
   if (!parts.at(-1).endsWith('.md')) return false;
   if (parts.length === 1) return FIELD_FILES.has(parts[0].slice(0, -3));
   if (parts[0] === 'message') return parts.length === 2 && /^\d+\.md$/.test(parts[1]);
@@ -73,7 +75,7 @@ export function nodeFiles(dir, skip = new Set(['backups', '待归位', '记录',
       if (e.isSymbolicLink()) fail('INVALID_PATH', `工程含链接：${next}`, 400);
       if (e.isDirectory()) {
         const top = next.split('/')[0];
-        if (!rel ? (['message', 'regex', 'scripts'].includes(e.name) || BOOK_DIR_NAMES.has(e.name)) : BOOK_DIR_NAMES.has(top)) walk(next);
+        if (!rel ? (['message', 'regex', 'scripts', 'variables'].includes(e.name) || BOOK_DIR_NAMES.has(e.name)) : (BOOK_DIR_NAMES.has(top) || (top === 'variables' && rel === 'variables'))) walk(next);
       }
       else if (isCardFile(next)) files.push(next);
     }
